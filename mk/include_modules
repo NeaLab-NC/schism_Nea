@@ -50,6 +50,10 @@
 # USE_POWELL = yes
 # EXEC := $(EXEC)_POWELL
 
+# POWELL, Wind Drag by storm sectors (PaHM)
+# USE_POWELL = yes
+# EXEC := $(EXEC)_POWELL
+
 # Harmonic analysis tool
 # USE_HA = yes
 # EXEC := $(EXEC)_HA

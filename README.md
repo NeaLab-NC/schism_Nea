@@ -5,8 +5,14 @@ with Modifications started on 2022 October 16 by J.Lefevre, IRD :
 
 Updates : 21-Oct-2022
 ---------------------
-- EXPERIMENTAL Branch: Add WindDragPowell as an option to compute Cdrag by storm sectors in PaHM. Induce some changes in Hydro/schism_step.F90
-- This is not a recommended commit, only to keep a copy of WindDragPowell() somewhere. 
+- EXPERIMENTAL Branch: Add WindDragPowell as one option to compute Cdrag by storm sectors in PaHM. Induce some changes in Hydro/schism_step.F90
+-                      Add USE_POWELL in include_modules
+-                      See rationale from Powell et al 2006 : “Final Report to the National Oceanic and Atmospheric Administration (NOAA) Joint 
+                           Hurricane Testbed (JHT) Program.” 26 pp
+-                      Add one png file in Core/Pahm/inputs with Niran using PAHM+POWELL (using "Prate" as output Bucket for Cdrag) 
+- This is not a recommended commit, only to keep a trace of WindDragPowell() somewhere. 
+- Keep care on this : 
+"The application of Powell wind drag in modelling storm surge in “small islands” can lead to weird variation of water levels, specially unrealistic negative wind setup on the leeward side. This is because Powell always assume opposing waves in the rear sector, and consequently large drag values, which is not the case on the leeward of small islands. source A.E.Hermosa 
 
 Updates : 17-Oct-2022
 ---------------------
