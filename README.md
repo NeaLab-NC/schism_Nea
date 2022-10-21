@@ -3,6 +3,11 @@
 SCHISM, Original Code cloned from https://github.com/schism-dev/schism
 with Modifications started on 2022 October 16 by J.Lefevre, IRD :
 
+Updates : 21-Oct-2022
+---------------------
+- EXPERIMENTAL Branch: Add WindDragPowell as an option to compute Cdrag by storm sectors in PaHM. Induce some changes in Hydro/schism_step.F90
+- This is not a recommended commit, only to keep a copy of WindDragPowell() somewhere. 
+
 Updates : 17-Oct-2022
 ---------------------
 - Add GAHM (Generalized Asymmetric Holland Model) in PaHM/parwind.F90 as a second alternative to Holland Model 
