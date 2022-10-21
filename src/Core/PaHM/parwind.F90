@@ -21,6 +21,7 @@
 ! ProcessAsymmetricVortexData : process track data into struc for time steps
 ! GetHollandFields: interpolate onto UG mesh wind and pressure
 ! GetGAHMFields: interpolate onto UG mesh wind and pressure
+! WindDragPowell: compute wind drag from the windspeed using GARRATT or POWELL (strom sectors)
 ! WriteBestTrackData
 ! WriteAsymmetricVortexData
 ! AllocBTrStruct
@@ -45,6 +46,11 @@ MODULE ParWind
   INTEGER :: method = 4, approach = 2    !PV shouldn't be a user input?
 
   INTEGER, PARAMETER, PRIVATE :: STORMNAMELEN = 10
+
+  ! Added for Mark Powell's sectorial wind drag.
+  REAL(SZ),save :: EyeLatR(3) 
+  REAL(SZ),save :: EyeLonR(3) 
+  LOGICAL,save  :: FoundEye
 
   !----------------------------------------------------------------
   ! The BestTrackData_T structure holds all data read from the best track files(s)
@@ -1812,6 +1818,10 @@ MODULE ParWind
     IF (firstCall) THEN
     firstCall = .FALSE.
 
+    EyeLatR(3) = 0.0d0
+    EyeLonR(3) = 0.0d0
+    FoundEye   = .FALSE.
+
     ALLOCATE(holStru(nBTrFiles))
 
     DO stCnt = 1, nBTrFiles
@@ -1969,6 +1979,19 @@ MODULE ParWind
           endif 
         endif
 
+#ifdef USE_POWELL
+        ! set eye location for sector based wind drag
+        if ( (lat.ne.EyeLatR(3)).or.(lon.ne.EyeLonR(3))) then
+         EyeLatR(1) = EyeLatR(2)
+         EyeLonR(1) = EyeLonR(2)
+         EyeLatR(2) = EyeLatR(3)
+         EyeLonR(2) = EyeLonR(3)
+         EyeLatR(3) = lat
+         EyeLonR(3) = lon
+         FoundEye = .TRUE.
+        endif
+#endif
+        
         !Max wind speed
         speed  = holStru(stCnt)%speed(jl1) + &
                  wtRatio * (holStru(stCnt)%speed(jl2) - holStru(stCnt)%speed(jl1))
@@ -2367,6 +2390,10 @@ MODULE ParWind
     IF (firstCall) THEN
       firstCall = .FALSE.
 
+      EyeLatR(3) = 0.0d0
+      EyeLonR(3) = 0.0d0
+      FoundEye   = .FALSE.      
+
       ALLOCATE(cHollBs1(np_gb), cHollBs2(np_gb))
       ALLOCATE(cPhiFactor1(np_gb), cPhiFactor2(np_gb))
       ALLOCATE(cVmwBL1(np_gb), cVmwBL2(np_gb))
@@ -2736,6 +2763,19 @@ MODULE ParWind
       endif
 ! End Jerome, same logic like in GetHollandFields
 ! -----------------------------------------------------------------------------
+#ifdef USE_POWELL
+        ! set eye location for sector based wind drag
+        if ( (clat.ne.EyeLatR(3)).or.(clon.ne.EyeLonR(3))) then
+         EyeLatR(1) = EyeLatR(2)
+         EyeLonR(1) = EyeLonR(2)
+         EyeLatR(2) = EyeLatR(3)
+         EyeLonR(2) = EyeLonR(3)
+         EyeLatR(3) = clat
+         EyeLonR(3) = clon
+         FoundEye = .TRUE.
+        endif
+!        wriite(16,*)'FoundEye',FoundEye
+#endif
 
       uTransNow = uTrans(stCnt, jl1) + wtratio * (uTrans(stCnt, jl2) - utrans(stCnt, jl1))
       vTransNow = vTrans(stCnt, jl1) + wtratio * (vTrans(stCnt, jl2) - vTrans(stCnt, jl1))
@@ -2754,7 +2794,6 @@ MODULE ParWind
          atmos_1=atmos_0
          exit
       endif !lrevert
-
 
       quadFlag4(2:5, 1:4) = quadFlag(stCnt, jl1, 1:4, 1:4)
       quadIr4(2:5, 1:4)   = REAL(ir(stCnt, jl1, 1:4, 1:4))
@@ -2898,6 +2937,210 @@ MODULE ParWind
   endif
 
   END SUBROUTINE GetGAHMFields
+
+!================================================================================
+#ifdef USE_POWELL
+
+! ----------------------------------------------------------------
+!  S U B R O U T I N E   W I N D   D R A G  P O W E L L
+! ----------------------------------------------------------------
+! Subroutine to calculate wind drag coefficient from the
+! windspeed., see adcirc v50, see 
+! https://ccht.ccee.ncsu.edu/wind-drag-based-on-storm-sectors/
+! Casey 110518: Added variables for Mark Powell's sector-based wind drag.
+! Lefevre J.191122 : Implement in schism/PahM system
+! ----------------------------------------------------------------
+  SUBROUTINE WindDragPowell(NodeNumber,WindSpeed,WindDrag)
+
+      USE PaHM_Global, ONLY   : DEG2RAD,DragLawString,WindDragLimit
+
+      IMPLICIT NONE
+
+      INTEGER, INTENT(IN)     :: NodeNumber
+      REAL(SZ), INTENT(IN)    :: WindSpeed
+      REAL(SZ), INTENT(INOUT) :: WindDrag
+!
+      INTRINSIC :: ATAN2
+      INTRINSIC :: MOD
+      INTEGER   :: IS,IW1,IW2,IW3
+      LOGICAL   :: FoundSector
+      REAL(SZ)  :: Dir1
+      REAL(SZ)  :: Dir2
+      REAL(SZ)  :: Drag(3)
+      REAL(SZ)  :: NodeDirection
+      REAL(SZ)  :: NodeLat
+      REAL(SZ)  :: NodeLon
+      REAL(SZ)  :: StormDirection
+      REAL(SZ)  :: Weight(3)
+!
+!     write(16,*) NodeNumber
+
+!      IF (mod(NodeNumber,1000)==0) write(16,*) NodeNumber,EyeLonR,EyeLatR
+
+      SELECT CASE(TRIM(DragLawString))
+!
+      CASE("Garratt","GARRATT","garratt","default")
+         WindDrag = 0.001d0*(0.75d0+0.067d0*WindSpeed)
+         IF(WindDrag.gt.WindDragLimit) WindDrag=WindDragLimit
+!
+!Casey 110518: Added Mark Powell's sector-based wind drag.
+      CASE("Powell","POWELL","powell")
+!.. Check whether we have previously found the eye.
+         IF((EyeLatR(1).EQ.0.D0).OR.(EyeLonR(1).EQ.0.D0).OR.&
+     &      (EyeLatR(2).EQ.0.D0).OR.(EyeLonR(2).EQ.0.D0).OR.&
+     &      (EyeLatR(3).EQ.0.D0).OR.(EyeLonR(3).EQ.0.D0))THEN
+            FoundEye = .FALSE.
+         ENDIF
+!C.. If the eye has not been found then apply Garratt.
+         WindDrag = 0.001D0*(0.75D0+0.067D0*WindSpeed)
+         IF(.NOT.FoundEye)THEN
+            FoundSector = .FALSE.
+            Weight = 0.D0
+            IF(WindDrag.GT.WindDragLimit) WindDrag = WindDragLimit
+!            IF (mod(NodeNumber,1000)==0) write(16,*) "GARRATT",WindDrag,NodeNumber
+         ELSE
+!C.. We have found the eye!
+!C.. Compute the storm's direction.  We use the convention of northward
+!C.. being zero degrees, and then cycling clockwise.
+            Dir1 = ATAN2(deg2rad*EyeLatR(2)-deg2rad*EyeLatR(1),deg2rad*EyeLonR(2)-deg2rad*EyeLonR(1))
+            Dir2 = ATAN2(deg2rad*EyeLatR(3)-deg2rad*EyeLatR(2),deg2rad*EyeLonR(3)-deg2rad*EyeLonR(2))
+            StormDirection = ATAN2(SIN(Dir1)+SIN(Dir2),COS(Dir1)+COS(Dir2))
+            StormDirection = StormDirection/DEG2RAD
+            StormDirection = 90.D0 - StormDirection
+            StormDirection = mod(StormDirection+360.D0,360.D0)
+!            IF (mod(NodeNumber,1000)==0) write(16,*) "StDir",StormDirection,NodeNumber
+!C.. Compute the direction of node relative to the eye.
+            NodeLon = xlon_gb(NodeNumber)!/DEG2RAD
+            NodeLat = ylat_gb(NodeNumber)!/DEG2RAD
+            NodeDirection = ATAN2(deg2rad*NodeLat-deg2rad*EyeLatR(3),deg2rad*NodeLon-deg2rad*EyeLonR(3))
+            NodeDirection = NodeDirection/DEG2RAD
+            NodeDirection = 90.D0 - NodeDirection
+            NodeDirection = mod(NodeDirection+360.D0,360.D0)
+!            IF (mod(NodeNumber,1000)==0) write(16,*) "ll,LL,NdDir",NodeLon,NodeLat,NodeDirection,NodeNumber
+!C.. Compute the weights for the sector in which the node is located.
+!C..     0- 40 : Transition from left (3) to right (1).
+!C..    40-130 : Right (1).
+!C..   130-170 : Transition from right (1) to rear (2).
+!C..   170-220 : Rear (2).
+!C..   220-260 : Transition from rear (2) to left (3).
+!C..   260-  0 : Left (3).
+            FoundSector = .FALSE.
+            DO IS=1,6
+               IF(IS.EQ.1)THEN
+                  Dir1 = MOD(StormDirection+  0.D0,360.D0)
+                  Dir2 = MOD(StormDirection+ 40.D0,360.D0)
+               ELSEIF(IS.EQ.2)THEN
+                  Dir1 = MOD(StormDirection+ 40.D0,360.D0)
+                  Dir2 = MOD(StormDirection+130.D0,360.D0)
+               ELSEIF(IS.EQ.3)THEN
+                  Dir1 = MOD(StormDirection+130.D0,360.D0)
+                  Dir2 = MOD(StormDirection+170.D0,360.D0)
+               ELSEIF(IS.EQ.4)THEN
+                  Dir1 = MOD(StormDirection+170.D0,360.D0)
+                  Dir2 = MOD(StormDirection+220.D0,360.D0)
+               ELSEIF(IS.EQ.5)THEN
+                  Dir1 = MOD(StormDirection+220.D0,360.D0)
+                  Dir2 = MOD(StormDirection+260.D0,360.D0)
+               ELSEIF(IS.EQ.6)THEN
+                  Dir1 = MOD(StormDirection+260.D0,360.D0)
+                  Dir2 = MOD(StormDirection+  0.D0,360.D0)
+               ENDIF
+               IF(Dir1.GT.Dir2)THEN
+                  IF((Dir1.LE.NodeDirection).AND.(NodeDirection.LE.360.D0))THEN
+                     Dir2 = Dir2 + 360.D0
+                  ELSEIF((0.D0.LE.NodeDirection).AND.(NodeDirection.LE.Dir2))THEN
+                     Dir1 = Dir1 - 360.D0
+                  ENDIF
+               ENDIF
+
+               IF((Dir1.LE.NodeDirection).AND.(NodeDirection.LE.Dir2))THEN
+                  IF(MOD(IS,2).EQ.0)THEN
+                     FoundSector = .TRUE.
+                     Weight = 0.D0
+                     Weight(IS/2) = 1.D0
+                  ELSE
+                     FoundSector = .TRUE.
+                     Weight = 0.D0
+                     IF(IS.EQ.1)THEN
+                        IW1 = 3
+                        IW2 = 1
+                     ELSEIF(IS.EQ.3)THEN
+                        IW1 = 1
+                        IW2 = 2
+                     ELSEIF(IS.EQ.5)THEN
+                        IW1 = 2
+                        IW2 = 3
+                     ENDIF
+                     Weight(IW1) = 1.D0 + (0.D0-1.D0)/(Dir2-Dir1)*(NodeDirection-Dir1)
+                     Weight(IW2) = 0.D0 + (1.D0-0.D0)/(Dir2-Dir1)*(NodeDirection-Dir1)
+                  ENDIF
+               ENDIF
+            ENDDO
+!C.. Apply the wind drag limit in case of emergency.
+            IF(.NOT.FoundSector)THEN
+               Weight = 0.D0
+               IF(WindDrag.GT.WindDragLimit) WindDrag = WindDragLimit
+!            IF (mod(NodeNumber,1000)==0) &
+!                  write(16,*) "emergency",WindDrag,NodeNumber
+            ELSE
+!C.. Determine the wind drag for sector 1 (right).
+               Drag(1) = WindDrag
+               IF(WindSpeed.LE.35.0)THEN
+                  IF(Drag(1).GT.0.0020)THEN
+                     Drag(1) = 0.0020
+                  ENDIF
+               ELSEIF(WindSpeed.LE.45.0)THEN
+                  Drag(1) = 0.0020 + (0.0030-0.0020)/(45.0-35.0)*(WindSpeed-35.0)
+               ELSE
+                  Drag(1) = 0.0030
+               ENDIF
+!C.. Determine the wind drag for sector 2 (rear).
+               Drag(2) = WindDrag
+               IF(WindSpeed.LE.35.0)THEN
+                  IF(Drag(2).GT.0.0020)THEN
+                     Drag(2) = 0.0020
+                  ENDIF
+               ELSEIF(WindSpeed.LE.45.0)THEN
+                  Drag(2) = 0.0020 + (0.0010-0.0020)/(45.0-35.0)*(WindSpeed-35.0)
+               ELSE
+                  Drag(2) = 0.0010
+               ENDIF
+!C.. Determine the wind drag for sector 3 (left).
+               Drag(3) = WindDrag
+               IF(Drag(3).GT.0.0018)THEN
+                  IF(WindSpeed.LE.25.0)THEN
+                     Drag(3) = 0.0018
+                  ELSEIF(WindSpeed.LE.30.0)THEN
+                     Drag(3) = 0.0018 + (0.0045-0.0018)/(30.0-25.0)*(WindSpeed-25.0)
+                  ELSEIF(WindSpeed.LE.45.0)THEN
+                     Drag(3) = 0.0045 + (0.0010-0.0045)/(45.0-30.0)*(WindSpeed-30.0)
+                  ELSE
+                     Drag(3) = 0.0010
+                  ENDIF
+               ENDIF
+!C.. Apply a weighted average.
+
+!in north Hem. Storm sector correspond to right (1), rear (2) and left (3). with right semi-circle dangerous wind
+!in south Hem, the left sector is the semi-circle dangerous wind, so impose Drag(1) in left sector and Drag(3) in Right sector
+               if (EyeLatR(3).lt.0.0d0) then
+                  WindDrag = Weight(1)*Drag(3) + Weight(2)*Drag(2) + Weight(3)*Drag(1)
+               else
+                  WindDrag = Weight(1)*Drag(1) + Weight(2)*Drag(2) + Weight(3)*Drag(3)
+               endif
+!               IF (mod(NodeNumber,1000)==0) &
+!                write(16,*) "POWELL",Drag(3),Drag(2),Drag(1),Weight(1),Weight(2),Weight(3),NodeNumber
+            ENDIF
+         ENDIF
+
+      CASE DEFAULT
+       write(errmsg,*)'ERROR: Wind drag law not recognized:',DragLawString
+       call parallel_abort(errmsg)
+
+      END SELECT
+
+      END SUBROUTINE WindDragPowell
+!     ----------------------------------------------------------------
+#endif
 
 !================================================================================
 

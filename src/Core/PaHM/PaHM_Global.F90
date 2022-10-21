@@ -201,6 +201,12 @@ MODULE PaHM_Global
                                                    !  3: Willoughby model
                                                    !  9: Asymmetric vortex model (Mattocks)
                                                    ! 10: Generalized asymmetric vortex Holland model (GAHM)
+!  #ifdef USE_POWELL
+  CHARACTER(19)     :: DragLawString = "POWELL"  ! The Wind Drag to use
+                                                 ! GARRATT or POWELL
+  REAL(SZ)          :: WindDragLimit = 0.0035d0                                                 
+!  #endif
+
   LOGICAL                 :: writeParams = .FALSE.
 !################################################################
 !###   END :: VARIABLES RELATED TO THE CONTROL FILE

@@ -27,7 +27,10 @@
       use gen_modules_clock
 
 #ifdef USE_PAHM
-      use ParWind, only: GetHollandFields
+      use ParWind, only: GetHollandFields,GetGAHMFields
+#ifdef USE_POWELL
+      use ParWind, only: WindDragPowell
+#endif
 #endif
 
 #ifdef USE_GOTM
@@ -338,7 +341,11 @@
 !'    Alloc. the large array for nws=4,-1 option (may consider changing
 !     to unformatted binary read)
       if(nws==4.or.nws<0) then
+#ifdef USE_PAHM  
+        allocate(rwild(np_global,6),stat=istat) !add 3 buckets to deal with taux/y,wind drag (POWELL)
+#else
         allocate(rwild(np_global,3),stat=istat)
+#endif
         if(istat/=0) call parallel_abort('MAIN: failed to alloc. (71)')
       endif !nws=4
 
@@ -451,6 +458,9 @@
 !$OMP end do
 
 !...  process new wind info 
+!$OMP workshare
+      tau=0.d0 !init. JEROME, tau from POWELL 
+!$OMP end workshare
 !...  Wind vectors always in lat/lon frame 
       if(nws==0) then
 !$OMP   workshare
@@ -466,27 +476,47 @@
 #ifdef USE_PAHM
       if(nws<0) then 
         !PaHM: rank 0 returns wind and air pressure only for global nodes
-        if(myrank==0) then
-          if (modelType==1) then       
+          if (modelType==1) then
             write(16,*)'before GetHollandFields'
-            call GetHollandFields(np_global,rwild)
+            call GetHollandFields(np_global,rwild(:,1:3))
             if(myrank==0) write(16,*)'after GetHollandFields'
           elseif (modelType==10) then
             write(16,*)'before GetGAHMFields'
-            call GetGAHMFields(np_global,rwild)
-            if(myrank==0) write(16,*)'after GetGAHMFields'      
-          else  
+            call GetGAHMFields(np_global,rwild(:,1:3))
+            if(myrank==0) write(16,*)'after GetGAHMFields'
+          else
             call parallel_abort('PaHM: modelType /=1 or =/10')
           endif
+#ifdef USE_POWELL
+          ! compute the wind drag using BLACK and POWELL scheme
+          ! windx = rwild(,1) windy =  rwild(,2)
+          do i=1,np_global
+            wmag=sqrt(rwild(i,1)**2.d0+rwild(i,2)**2.d0)
+            ! use dragcoef as WindDrag bucket
+            dragcoef=0.0d0
+            if(i.eq.1) write(16,*)'Call WindDragPowell'
+            Call WindDragPowell(i,wmag,dragcoef)
+            ! put Cdrag in fluxprc !!
+            !dragcoef=min(max(dragcoef,dragcmin),dragcmax)
+            rwild(i,4)=dragcoef*0.001293d0*wmag*rwild(i,1)*rampwind !taux
+            rwild(i,5)=dragcoef*0.001293d0*wmag*rwild(i,2)*rampwind !tauy
+            rwild(i,6)=dragcoef
+          enddo !i
+#endif
         endif !myrank
 
-        call mpi_bcast(rwild,3*np_global,rtype,0,comm,istat)
+        call mpi_bcast(rwild,6*np_global,rtype,0,comm,istat)
         do i=1,np_global
           if(ipgl(i)%rank==myrank) then
             nd=ipgl(i)%id
             windx(nd)=rwild(i,1)
             windy(nd)=rwild(i,2)
             pr(nd)=rwild(i,3)
+#ifdef USE_POWELL
+            tau(1,nd)=rwild(i,4)
+            tau(2,nd)=rwild(i,5)
+            fluxprc(nd)=rwild(i,6)
+#endif
           endif
         enddo !i
       endif !nws<0
@@ -822,9 +852,9 @@
 
 !$OMP parallel default(shared) private(i,wmag,dragcoef,tmp,theta,z0_donelan)
 
-!$OMP workshare
-      tau=0.d0 !init.
-!$OMP end workshare
+!!$OMP workshare
+!      tau=0.d0 !init. JEROME, already Done,due to POWELL calc. in PaHM 
+!!$OMP end workshare
 
 !$OMP do
       do i=1,npa
@@ -839,6 +869,10 @@
             tau(1,i)=-tauxz(i)/rho0*rampwind*windfactor(i)**2.d0 !sign and scale difference between stresses tauxz and tau
             tau(2,i)=-tauyz(i)/rho0*rampwind*windfactor(i)**2.d0
           endif
+#if defined USE_PAHM && defined USE_POWELL
+        else if(nws<0) then
+            cycle ! already done above, in PaHM Call
+#endif
         else !if(nws==1.or.nws>=4.or.nws>=2.and.ihconsv==0.or.iwind_form==-1) then
           wmag=sqrt(windx(i)**2.d0+windy(i)**2.d0)
           if(iwind_form==-1) then !P&P

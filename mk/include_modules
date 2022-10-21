@@ -42,9 +42,13 @@
 # USE_WWM = yes
 # EXEC := $(EXEC)_WWM
 
-#aParametric wind module
+# Parametric wind module
 # USE_PAHM = yes
 # EXEC := $(EXEC)_PAHM
+
+# POWELL, Wind Drag by storm sectors (PaHM)
+# USE_POWELL = yes
+# EXEC := $(EXEC)_POWELL
 
 # Harmonic analysis tool
 # USE_HA = yes

@@ -208,6 +208,9 @@ endif
 
 ifdef USE_PAHM
   PPFLAGS := $(PPFLAGS) $(IBMCPP)-DUSE_PAHM
+ifdef USE_POWELL
+  PPFLAGS := $(PPFLAGS) -DUSE_POWELL
+endif  
   OBJS := $(OBJS) PaHM_Sizes.o PaHM_Global.o PaHM_Messages.o TimeDateUtils.o PaHM_Utilities.o \
         csv_module.o SortUtils.o csv_parameters.o PaHM_Vortex.o \
         csv_utilities.o  parwind.o
