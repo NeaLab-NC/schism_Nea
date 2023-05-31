@@ -43,12 +43,56 @@
 !'
 
 !...  Output max. # of iterations for all ranks for WBL (Grant-Madsen formulation)
-#ifdef USE_WWM
-        if(iwbl==1) then
-           call mpi_reduce(iwbl_itmax,iwbl_itmax_gb,1,itype,MPI_MAX,0,comm,ierr)
-           if(myrank==0) write(16,*)'Max. iteration for Grant-Madsen = ',iwbl_itmax_gb
-        endif !iwbl
-#endif /*USE_WWM*/
+#if defined USE_WWM ||defined USE_SWAN
+      if(iwbl==1) then
+         call mpi_reduce(iwbl_itmax,iwbl_itmax_gb,1,itype,MPI_MAX,0,comm,ierr)
+         if(myrank==0) write(16,*)'Max. iteration for Grant-Madsen = ',iwbl_itmax_gb
+      endif !iwbl
+
+!#ifdef USE_PAHM
+
+!...  Output max. Hs
+      fdb='maxhs_000000'
+      lfdb=len_trim(fdb)
+      write(fdb(lfdb-5:lfdb),'(i6.6)') myrank
+      open(10,file=out_dir(1:len_out_dir)//fdb,status='replace')
+      write(10,*)np,nproc
+      do i=1,np
+        write(10,'(i11,3(1x,e20.12))')iplg(i),xnd(i),ynd(i),hsmax(i)
+      enddo !i
+      close(10)
+!...  Output Peak direction at max. Hs
+      fdb='maxdir_000000'
+      lfdb=len_trim(fdb)
+      write(fdb(lfdb-5:lfdb),'(i6.6)') myrank
+      open(10,file=out_dir(1:len_out_dir)//fdb,status='replace')
+      write(10,*)np,nproc
+      do i=1,np
+        write(10,'(i11,3(1x,e20.12))')iplg(i),xnd(i),ynd(i),dirmax(i)
+      enddo !i
+      close(10)
+!...  Output Peak period at max. Hs
+      fdb='maxtp_000000'
+      lfdb=len_trim(fdb)
+      write(fdb(lfdb-5:lfdb),'(i6.6)') myrank
+      open(10,file=out_dir(1:len_out_dir)//fdb,status='replace')
+      write(10,*)np,nproc
+      do i=1,np
+        write(10,'(i11,3(1x,e20.12))')iplg(i),xnd(i),ynd(i),tpmax(i)
+      enddo !i
+      close(10)
+!...  Output Peak directional spreading at max. Hs
+      fdb='maxspr_000000'
+      lfdb=len_trim(fdb)
+      write(fdb(lfdb-5:lfdb),'(i6.6)') myrank
+      open(10,file=out_dir(1:len_out_dir)//fdb,status='replace')
+      write(10,*)np,nproc
+      do i=1,np
+        write(10,'(i11,3(1x,e20.12))')iplg(i),xnd(i),ynd(i),sprmax(i)
+      enddo !i
+      close(10)
+!#endif
+#endif /*USE_WWM||USE_SWAN*/
 
 !...  Output max. elevations & dahv
       fdb='maxelev_000000'

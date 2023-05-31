@@ -36,7 +36,15 @@ module schism_glbl
   integer,parameter ::out_rkind=4     !Default output real type
 #endif
 
-
+#ifdef USE_SWAN
+! SWAN (unswan) want skind and dkind
+#if !defined (DOUBLE_REAL_OUT)
+  INTEGER, PARAMETER :: skind = SELECTED_REAL_KIND(6,30)
+#else
+  INTEGER, PARAMETER :: skind = SELECTED_REAL_KIND(12,300)
+#endif
+  INTEGER, PARAMETER :: dkind = SELECTED_REAL_KIND(12,300)
+#endif  
 
   ! Some constants
   integer,parameter :: nthfiles=5 !# of type I (ASCII) .th files (for dimensioning)
@@ -398,6 +406,14 @@ module schism_glbl
   integer,save,allocatable :: nlnd(:)          ! Number of nodes in each land bndry segment
   integer,save,allocatable :: ilnd(:,:)        ! Node list for each land bndry segment
 
+#ifdef USE_SWAN
+  ! SWAN (unswan) convention :
+  !     isonb_w(i)=0:  node in the interior computational domain                 !
+  !     isonb_w(i)=1:  node on the solid boundary
+  !     isonb_w(i)=2:  node on the open boundary
+  integer,save,allocatable    :: isonb_w(:)    !!Node type FOR SWAN (Local)
+#endif
+
   ! Dynamic quantities
   integer,save,allocatable :: ieg_source(:)   !global elem. indices for volume/mass sources
   integer,save,allocatable :: ieg_sink(:)   !global elem. indices for volume/mass sinks
@@ -587,9 +603,9 @@ module schism_glbl
 ! vertical flux diversion closure fraction applied at surface
 !  real(rkind) :: vclose_surf_frac   ! 1.0:flux applied at surface, 0.5:half at top half at bottom
 
-! WWM
-!#ifdef USE_WWM
-  integer,save :: msc2,mdc2
+! WWM 
+integer,save :: msc2,mdc2
+#ifdef USE_WWM
   real(rkind),save,allocatable :: wwave_force(:,:,:), jpress(:), sbr(:,:), sbf(:,:), srol(:,:), sds(:,:), sveg(:,:), eps_w(:), eps_r(:),eps_br(:)
   real(rkind),save,allocatable :: stokes_hvel(:,:,:), stokes_wvel(:,:), stokes_hvel_side(:,:,:), stokes_wvel_side(:,:)
   real(rkind),save,allocatable :: roller_stokes_hvel(:,:,:), roller_stokes_hvel_side(:,:,:)
@@ -605,7 +621,19 @@ module schism_glbl
   real(rkind),save,allocatable :: wave_sintot(:)
   real(rkind),save,allocatable :: wave_sdstot(:)
   real(rkind),save,allocatable :: wave_svegtot(:)
-!#endif
+#endif
+
+#ifdef USE_SWAN
+ !  Same as above for wwm, but declared in SWAN/mod_main_wave
+ !  declaration and allocation of out_wwm*, wwave_force,stokes_vel,jpress(:),sbr,sbf,stokes_hvel_side etc
+#endif
+
+#if defined USE_SWAN || defined USE_WWM
+  ! output stats for wave: Hs (and Peak Period, Peak Direction, Peak Spreading at time of max(Hs) )
+  ! Usefull in "Extrema" studies for sea states  ...
+  real(rkind),save,allocatable,target :: hsmax(:),tpmax(:),dirmax(:),sprmax(:)
+#endif
+
 
 ! TIMOR
 !#ifdef USE_TIMOR

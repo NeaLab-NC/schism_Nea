@@ -88,6 +88,10 @@
        USE sed_mod, only : Srho,Nbed,MBEDP,bed,bed_frac,Wsed,Sd50
 #endif
 
+#ifdef USE_SWAN
+       USE MOD_WAVE_CURRENT, ONLY : AC2, INIT_SPECTRAL_GRID
+#endif
+       
       implicit none
 
       include 'mpif.h'
@@ -101,6 +105,15 @@
       real(rkind), allocatable :: swild(:)
       real(4), allocatable :: swild9(:,:) !used in tracer nudging
       real(4), allocatable :: rwild(:,:) !used in nws=4
+
+#ifdef USE_SWAN
+      integer, allocatable :: nwild(:)
+      integer :: ncid2,IS,ID,iproc
+      real(rkind), allocatable :: swild98(:,:,:)
+      integer, allocatable :: send_rqst(:)
+      integer, allocatable :: send_stat(:,:)
+      real(rkind), allocatable :: spec(:,:) !spec(:)
+#endif
 
       allocate(swild9(nvrt,mnu_pts),swild(nsa+nvrt+12+ntracers),stat=istat)
       if(istat/=0) call parallel_abort('MISC: swild9')
@@ -414,6 +427,141 @@
       CALL INITIALIZE_WWM
 #endif      
 
+!   Initialize SWAN
+#ifdef USE_SWAN
+      allocate(nwild(5),stat=istat)
+      if(istat/=0) call parallel_abort('nwild allocation failure')
+
+      !Init. windx,y for SWAN
+      if(nws==0) then
+        windx=0._rkind
+        windy=0._rkind
+      else
+        wtratio=(time-wtime1)/(wtime2-wtime1)
+        windx=windx1+wtratio*(windx2-windx1)
+        windy=windy1+wtratio*(windy2-windy1)
+      endif
+      !CALL INITIALIZE_SWAN
+      if(myrank==0) write(16,*)'Ready to Init SWAN...'
+      CALL SWMAIN_SETUP(dt,nstep_wwm)
+      if(myrank==0) write(16,*)'SWAN Init done...'
+      !print*,'SWAN Init done...'
+
+      ! Fill DS_BAND and DS_INCR arrays
+      if(myrank==0) write(16,*)'CALL INIT_SPECTRAL_GRID...'
+      CALL INIT_SPECTRAL_GRID
+      if(myrank==0) write(16,*)'CALL INIT_SPECTRAL_GRID done...'
+      ! print*,'CALL INIT_SPECTRAL_GRID done...'
+
+      !SWAN starting from a hotfile
+      ! ---------------------------
+      if(ihot/=0) then
+
+        ! Only the master read the data
+        if(myrank.EQ.0) then
+
+         if(myrank==0) write(16,*)'READ AC2...'
+
+          j=nf90_open('hotstart.nc',OR(NF90_NETCDF4,NF90_NOWRITE),ncid2) ! Already open
+          if(j/=NF90_NOERR) &
+           call parallel_abort('init: hotstart.nc not found')
+
+          !Sanity check dims
+          nwild=-999 !init
+
+          j=nf90_inq_dimid(ncid2,'ndir',mm)
+          if(j/=NF90_NOERR) &
+           call parallel_abort('Hot swan init: missing ndir dim in hotstart')
+          j=nf90_inquire_dimension(ncid2,mm,len=nwild(1))
+
+          j=nf90_inq_dimid(ncid2,'nfreq',mm)
+          if(j/=NF90_NOERR) &
+           call parallel_abort('Hot swan init: missing nfreq dim in hotstart')
+          j=nf90_inquire_dimension(ncid2,mm,len=nwild(2))
+
+          if(nwild(1)/=mdc2 .OR. nwild(2)/=msc2) then
+            write(errmsg,*)'Hot swan init: dim mismatch,',nwild(1:2),mdc2,msc2
+            call parallel_abort(errmsg)
+          endif
+
+          ! Read AC2
+
+          write(16,*)'Before Allocation for AC2 from Hotstart...'
+          IF(allocated(swild98)) deallocate(swild98)
+          allocate(swild98(mdc2,msc2,np_global),stat=istat);
+          if(istat/=0) call parallel_abort('MISC: swild98')
+          swild98 = 0._rkind
+
+          j=nf90_inq_varid(ncid2,"AC2",mm)
+          if(j/=NF90_NOERR) call parallel_abort('Hot swan init: nc AC2')
+          j=nf90_get_var(ncid2,mm,swild98(1:mdc2,1:msc2,1:np_global),(/1,1,1/),&
+            (/mdc2,msc2,np_global/))
+          if(j/=NF90_NOERR)&
+            call parallel_abort('Hot swan init: nc slice AC2')
+
+          write(16,*)'READ AC2... end'
+
+          if(nproc>1) &
+            allocate(send_rqst(nproc-1),send_stat(MPI_STATUS_SIZE,nproc-1), stat=istat)
+
+        endif ! myrank=0
+
+        ! Begin to broadcast the huge AC2 matrice ...
+        ! may lead to Segfault due to memory exhaustion if using a lazy mpi_bcast ...
+
+        if(nproc>1)then  ! NOT SERIAL
+
+          !allocate(SPEC(np_global), stat=istat)
+          allocate(SPEC(msc2,np_global), stat=istat)
+
+          DO ID=1,mdc2
+            !DO IS=1,msc2
+
+              if(myrank.EQ.0) then
+
+                !SPEC = swild98(ID,IS,:)
+                SPEC = swild98(ID,:,:)
+
+                DO iProc=2,nproc
+                   CALL mpi_isend(SPEC,msc2*np_global,rtype,iProc-1,2031,comm,send_rqst(iProc-1),ierr)
+                ENDDO
+                call mpi_waitall(nproc-1, send_rqst, send_stat,istat)
+
+              else
+
+                call mpi_recv(SPEC,msc2*np_global,rtype,0,2031, comm, istatus,ierr)
+
+              endif
+
+              do i=1,np_global
+               if(ipgl(i)%rank==myrank) then
+                 ip=ipgl(i)%id
+                 !AC2(ID,IS,ip) = SPEC(i)
+                 AC2(ID,:,ip) = SPEC(:,i)
+               endif
+              enddo
+
+            !ENDDO !IS
+          ENDDO !ID
+
+          if(myrank.EQ.0) then
+            IF(allocated(swild98)) deallocate(swild98)
+            IF(allocated(send_rqst)) deallocate(send_rqst)
+            IF(allocated(send_stat)) deallocate(send_stat)
+          endif
+
+          IF(allocated(SPEC)) deallocate(SPEC)
+
+        else ! SERIAL
+             AC2(1:mdc2,1:msc2,1:np_global) = swild98(1:mdc2,1:msc2,1:np_global)
+        endif
+
+      if(myrank==0)&
+         write(16,*)'done renitializing AC2 for SWAN hot starting'
+
+      endif !ihot
+#endif /*USE_SWAN*/
+      
 !...  Nudging 
       !Shared variables for inu_tr=2 (not used if none of inu_tr=2)
       ntmp=time/step_nu_tr+1
@@ -3899,6 +4047,8 @@
 
       end function u_compactzonal
 
+
+#if defined USE_WWM || defined USE_SWAN      
 !===============================================================================
 !     Compute apparent roughness height including effect of wave bottom boundary layer
 !     (WBL) using modified Grant-Madsen formulation as in Zhang et al. (2004)
@@ -4079,6 +4229,9 @@
 
       end subroutine wbl_Soulsby97
 
+#endif /*USE_WWM || USE_SWAN*/
+
+
 !====================================================================================|
       subroutine current2wave_KC89
    
@@ -4095,11 +4248,16 @@
 ! coupling current according to Kirby and Chen (1989).  and comments
 ! form the Kirky and Chen implementation from last paper above
 !--------------------------------------------------------------------!
-   
-       use schism_glbl, only: iplg,errmsg,hmin_radstress,kbp,idry,nvrt, &
-                              dp,eta2,znl,npa,uu2,vv2,pi,               &
-                              rkind,out_wwm,curx_wwm,cury_wwm
-       use schism_msgp, only: exchange_p2d,parallel_abort
+  
+       use schism_msgp, only: exchange_p2d,parallel_abort 
+       use schism_glbl, only: iplg,errmsg,hmin_radstress,kbp,idry,nvrt
+       use schism_glbl, only: dp,eta2,znl,npa,uu2,vv2,pi,rkind        
+#ifdef USE_WWM
+       use schism_glbl, only: out_wwm,curx_wwm,cury_wwm
+#endif /*USE_WWM*/
+#ifdef USE_SWAN
+       use VARS_WAVE, only: out_wwm,curx_wwm,cury_wwm
+#endif /*USE_SWAN*/      
 
        IMPLICIT NONE
    
@@ -6090,6 +6248,7 @@
 !===============================================================================
 !<weno
 
+#ifdef USE_WWM
       subroutine compute_bed_slope
       !-------------------------------------------------------------------------------
       ! MP from KM
@@ -6173,11 +6332,14 @@
       call exchange_p2d(glbvar)
       
       end subroutine smooth_2dvar
+#endif /*USE_WWM*/
 
-
+#ifdef USE_WW3
 !     This routine is called from ESMF directly to be used for USE_WW3
-!     Compute wave force using Longuet-Higgins Stewart formulation
       subroutine compute_wave_force_lon(RSXX0,RSXY0,RSYY0)
+      !-------------------------------------------------------------------------------
+      ! Compute wave force using Longuet-Higgins Stewart formulation
+      !-------------------------------------------------------------------------------              
       use schism_glbl, only : rkind,nsa,np,npa,nvrt,rho0,idry,idry_s,dp,dps,hmin_radstress, &
      &WWAVE_FORCE,errmsg,it_main,time_stamp,ipgl
       use schism_msgp
@@ -6267,6 +6429,7 @@
 
 !      deallocate(DSXX3D,DSYY3D,DSXY3D)
       end subroutine compute_wave_force_lon
+#endif   /*USE_WW3*/
 
 !     Save temp 3D vars and send to scribes
       subroutine savensend3D_scribe(icount,imode,ivs,nvrt0,npes,savevar1,savevar2)

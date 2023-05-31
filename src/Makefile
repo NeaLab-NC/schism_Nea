@@ -106,7 +106,7 @@ endif
 
 #Search path
 VPATH = Core/ Core/PaHM/ Driver/ Hydro/ EcoSim/ COSINE/ Sediment/ Sed2d/ \
-        WWMIII/ ICM/ TIMOR/ FIB/ Ice/ Multi_ice/ Fabm/
+        WWMIII/ SWAN/ ICM/ TIMOR/ FIB/ Ice/ Multi_ice/ Fabm/
 
 ifdef FUJITSU
   PPFLAGS := $(PPFLAGS) $(IBMCPP)-DFUJITSU
@@ -293,6 +293,16 @@ ifdef USE_WWM
        wwm_specint.o wwm_nums1d.o wwm_numtheta.o wwm_numsigma.o wwm_fluctsplit.o \
        wwm_snonlin.o wwm_stress.o wwm_stresso.o wwm_sbottom.o wwm_sdiss_ardh_vec.o wwm_sinput.o wwm_sinput_ard.o wwm_wsigstar.o wwm_tauhf.o wwm_airsea.o wwm_jafu.o wwm_nlweigt.o wwm_buildstress.o wwm_inisnonlin.o wwm_fkmean.o wwm_frcutindex.o wwm_femeanws.o wwm_sdissip.o wwm_implsch.o wwm_implsch2.o \
        wwm_output.o wwm_compute.o wwm_compute_roller.o wwm_diffrac.o wwm_coupl_roms_pipe.o wwm_coupl_roms_pgmcl.o wwm_jacobi.o wwm_coupl_shyfem.o wwm_coupl_selfe.o wwm_coupl_timor.o wwm_vegdiss.o wwm_main.o wwm_lpp_filter.o
+endif
+
+ifdef USE_SWAN
+  PPFLAGS := $(PPFLAGS) -DUSE_SWAN
+  OBJS := $(OBJS) mod_main_wave.o swmod1.o swmod2.o swmod3.o swangriddata.o swangridobjects.o mod_wave_current.o ocpmix.o ocpcre.o ocpids.o\
+         swancreateedges.o swangridcell.o swangridface.o swangridvert.o\
+         swanpointinmesh.o swanfindpoint.o swancrossobstacle.o swancompdata.o swanpre1.o swanpre2.o swan_bdcons.o \
+         swanvertlist.o swanfindobstacles.o swanprepcomp.o swanintgratspc.o swandiffpar.o swangraddepthork.o swandisparm.o\
+         swanpropvelx.o swansweepsel.o swanconvaccur.o swanconvstopc.o swanpropvels.o swangsecorr.o swantranspx.o swantranspac.o\
+         swancom1.o swancom2.o swancom3.o swancom4.o swancom5.o swancompunstruc.o swanser.o swanmain.o
 endif
 
 ifdef USE_ICE

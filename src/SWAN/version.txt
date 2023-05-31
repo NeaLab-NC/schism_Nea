@@ -1,0 +1,13 @@
+!     SWAN (Simulating WAves Nearshore); a third generation wave model
+!     Copyright (C) 1993-2017  Delft University of Technology
+!
+!     SWAN from DELFT, REVISION:  41.20
+!
+!     A modified version for coupling with SCHISM by JEROME LEFEVRE
+!     see comments marked with JL in "swanmain.F90" etc.
+!     
+!     Solvers supported in SCHISM-SWAN coupling : Strongly Implicit Solver (SIP) only
+!     Grids supported in SCHISM-SWAN coupling : Unstructured only, with triangles only
+!     (SCHISM and SWAN share the same grid)
+!
+!     jerome.lefevre@ird.fr

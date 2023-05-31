@@ -1,0 +1,165 @@
+$*************HEADING****************************************
+$
+PROJ 'my_fake_project' '01'
+$
+$------- SET  setting physical parameters and error counters
+$
+$SET LEVEL = 0.0
+$SET NOR = 90.0
+$SET DEPMIN = 0.05
+$SET MAXMES = 0
+SET MAXERR = 3
+$SET GRAV = 9.81
+$SET RHO = 1025.00
+$SET INRHOG = 0
+$SET HSRERR = 0.1
+$SET PWTAIL = 3.0
+$SET FROUDMAX = 0.8
+$SET SORT = -999.0
+SET PRINTF = 4
+SET PRTEST = 5
+SET NAUT
+MODE NONSTATIONARY
+
+COORDINATES CARTESIAN
+$
+$
+$ ********************MODEL INPUT************************
+$
+$ ****************  Computation Grid. *******************
+$
+CGRID UNSTRUCTURED CIRCLE MDC=36 FLOW=0.031 FHIGH=1.42 MSC=29
+
+$
+&& KEYWORD TO CREATE CURRENT GRID &&
+$INPGRID CURRENT CURVILINEAR 0 0 500 135 EXC 9.999000e+003              &
+$        NONSTAT  20100801.000000 1 DAY 20100901.000000
+
+&& KEYWORD TO CREATE WATER LEVEL GRID &&
+$INPGRID WLEV CURVILINEAR 0 0 500 135 EXC 9.999000e+003                 &
+$        NONSTAT  20100801.000000 1 DAY 20100901.000000
+
+&& KEYWORD TO CREATE BOTTOM FRICTION GRID &&
+$INPGRID FRIC CURVILINEAR 0 0 500 135 EXC 9.999000e+003                 &
+$        NONSTAT  20100801.000000 1 DAY 20100901.000000
+
+&& Wind forcing &&
+$INPGRID WIND REGULAR 155000.0 3200000.0 0 92 32 6350.0 7400.0 EXC 9.999000e+003
+$READINP WIND  1 'C:\Users\rmickey\Documents\SWAN_ngomex\breton\forcings\swan_wind\H1_D1_wind.dat' 4 0 FREE
+
+&&INPGRID WIND 276.459991 24.100000 0. 209 161 0.024663 0.022500 NONSTAT 20100301.1800 #TSTEP#.0 HR 20100310.1200
+&&READINP WIND 1.0 '2010030118.wnd' 3 0 0 0 FREE
+$
+
+$ ======== Section 3. Input ===============================
+
+SCGRID INP_CUR = F
+!$$if INP_CUR == T
+SCGRID INP_CUR_STAT = F
+SCGRID INP_CUR_NAME =  curr.xy
+!$$if INP_CUR_STAT == F
+SCGRID CUR_TBEGINP = 0
+SCGRID CUR_DELTINP = 1
+SCGRID CUR_TENDINP = 100
+!$$endif INP_CUR_STAT
+SCGRID INP_CUR_SERI = F
+!$$endif INP_CUR
+
+!INP_WI = T
+!$$if INP_WI == T
+!INP_WI_STAT = F
+!INP_WI_NAME =  wind.xy
+!$$if INP_WI_STAT == F
+!WI_TBEGINP = 0.0          !unit = hour
+!WI_DELTINP = 1.0          !unit = hour
+!WI_TENDINP = 738.0          !unit = hour
+!$$endif INP_WI_STAT
+SCGRID INP_WI_SERI = T
+!$$endif INP_WI
+
+SCGRID INP_FR = F
+!$$if INP_FR == T
+
+SCGRID INP_WLEV = F
+!$$if INP_WLEV == T
+SCGRID INP_WLEV_STAT = F
+SCGRID INP_WLEV_NAME = wlev.xy
+!$$if INP_WLEV_STAT == F
+SCGRID WLEV_TBEGINP = 0
+SCGRID WLEV_DELTINP = 1
+SCGRID WLEV_TENDINP = 100
+!$$endif INP_WLEV_STAT
+SCGRID INP_WLEV_SERI = F
+!$$endif INP_WLEV
+
+!-------- WIND  parameters uniform wind field -------------------------
+!WIND = F     !T
+!$$if WIND == T
+!U10 =  0.0
+!WDIP = 90.0
+!$$endif WIND
+
+&& BOUNDARY FORCING &&
+& --------------------------------
+$
+$ PREFER BOUN SEG NPTS IJ K" rather than "BOUN WWIII" since "BOUN WWIII" requires multiple locations in one file.
+$
+SCBOU BOUNDARY = defined     !default     !defined
+!$$if BOUNDARY == defined
+SCBOU BOUND_CHOICE = NESTING  !UNIFORM (or CONSTANT), NESTING
+SCBOU NESTING_TYPE_WAVE = WAMPARAM
+!SCBOU NESTING_FILE = WAVEFILE.dat
+SCBOU NESTING_FILE = WAVEFILE.nc
+SCBOU SHAPESPEC = JON       !JON, PM, GAUS, BIN
+!$$if SHAPESPEC == JON
+SCBOU GAMMA = 3.3
+!$$else if SHAPESPEC = GAUS
+!SCBOU SIGFR = 0.01
+!$$end if SHAPESPEC
+SCBOU CHAR_WAVE_PERIOD = PEAK      !PEAK, MEAN
+SCBOU DSPR = POW                   !POW, DEGREES
+SCBOU HSIG = 0.05
+SCBOU PER = 10.0
+SCBOU DIR = 185.0
+SCBOU DD = 20.0
+!$$endif BOUNDARY
+
+$ ***************  PHYSICS  ***************************
+$
+GEN3 KOMEN AGROW
+WCAP KOMEN 2.36E-5 3.02E-3 2.0 1.0 1.0
+BREAKING CON 1.0 0.73
+FRICTION MADSEN KN=0.05
+PROP BSBT
+TRIAD
+$OFF QUAD
+$OFF WINDG
+$OFF REF
+$
+NUM STOPC DABS=0.005 DREL=0.01 CURVAT=0.005 NPNTS=95 NONSTAT MXITNS=25
+$
+$INIT ZERO
+$
+$************ Output REQUESTS *************************
+$
+$ POINTS 'BUOYS' FILE   'f31hari.loc'
+$ TABLE  'BUOYS' HEAD   'f32har01.tab' DIST DEP HS RTP TM01 TM02 DSPR DIR FORCE
+$ TABLE  'BUOYS' NOHEAD 'f32har01.tbl' HS RTP TPS TM01 TM02
+$ SPEC   'BUOYS' SPEC1D 'f32har01.spc'
+$
+&&BLOCK 'COMPGRID' NOHEAD 'ouvea_test.nc' LAY 3 TIME XP YP HSIGN DIR TM01 DEPTH OUTPUT 20130101.000000 60 min
+$
+$SPECTRA OUT-LOCATIONS
+$
+$SPECTRA COMMANDS
+$
+$PARTITION OUTCOMMANDS
+$
+
+!======== Section 7. Command COMPUTE ==============================================
+$ set itest=1 in order to get detailed information in PRINT file
+$TEST 1,0 POI IJ 50 52 54 PAR 'TEST.PAR'
+$TEST ITEST=1 ITRACE=1 POINT IJ 48260 47913 PAR 'TEST.PAR'
+TEST ITEST=0 ITRACE=10 POINT IJ 500
+COMPUTE 800 SEC
+

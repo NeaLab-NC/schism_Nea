@@ -102,7 +102,11 @@
       use ice_module, only: ntr_ice,u_ice,v_ice,ice_tr,delta_ice,sigma11, &
    &sigma12,sigma22
       use ice_therm_mod, only: t_oi
+#endif
 
+#ifdef USE_SWAN
+      USE VARS_WAVE, only: wwave_force,radflag
+      USE MOD_WAVE_CURRENT
 #endif
 
       implicit none
@@ -181,6 +185,13 @@
 
 #ifdef USE_OIL
 #endif
+
+! jerome local_to_global : in netCDF format 
+      integer:: ncid_l2g ! local_to_global netcdf Id
+      character(len=140) :: fname
+      integer:: node_dim,elem_dim,side_dim,nvrt_dim,ntracers_dim,three_dim,two_dim,one_dim, &
+               &four_dim,nz_dim,nsigma_dim,iret
+
 
 !     Name list
       integer :: ntracer_gen,ntracer_age,sed_class,eco_class !,flag_fib
@@ -732,7 +743,9 @@
 
 !      iwind_form=0 !init.
       if(nws/=0) then
-        if(iwind_form<-3.or.iwind_form>1) then
+!        if(iwind_form<-3.or.iwind_form>1) then
+!#JL: !Add Case 2:Zijlema, 3:Wu, 4:Garrison Params
+        if(iwind_form<-2.or.iwind_form>4) then
           write(errmsg,*)'Unknown iwind_form',iwind_form
           call parallel_abort(errmsg)
         endif
@@ -1096,7 +1109,7 @@
 !...  Read harmonic analysis information (Adapted from ADCIRC)
 !      call get_param('param.in','iharind',1,iharind,tmp,stringvalue)
 
-!...  WWM 
+!...  WWM / SWAN
 !     Coupling flag
 !     0: decoupled so 2 models will run independently;
 !     1: full coupled (elevation, vel, and wind are all passed to WWM);
@@ -1130,7 +1143,7 @@
         call parallel_abort(errmsg)
       endif
 
-! BM: coupling current for WWM
+! BM: coupling current for WWM / SWAN
       if(cur_wwm<0.or.cur_wwm>2) then
         write(errmsg,*)'Wrong coupling current:',cur_wwm
         call parallel_abort(errmsg)
@@ -1141,6 +1154,23 @@
 #ifdef USE_NWM_BMI
       if(if_source==0) call parallel_abort('INIT: USE_NWM_BMI cannot go with if_source=0')
 #endif
+
+#ifdef  USE_SWAN
+      if(myrank==0) write(16,*)'SWAN coupling flag done...'
+#endif
+
+#ifdef  USE_WWM
+      if(myrank==0) write(16,*)'WWM coupling flag done...'
+#endif
+
+#ifdef BULK_FAIRALL
+      if(ihconsv/=0.and.nws==2.and.myrank==0) write(16,*)'Turb. Fluxes: Fairall et al.(03)'
+#else
+      if(ihconsv/=0.and.nws==2.and.myrank==0) write(16,*)'Turb. Fluxes: Zeng et al.(98)'
+#endif
+
+!     Volume and mass sources/sinks option (-1:nc; 1:ASCII)
+      if(iabs(if_source)>1) call parallel_abort('Wrong if_source')
 
 !     Check all ramp periods
 !      if(if_source/=0.and.nramp_ss/=0.and.dramp_ss<=0.d0) call parallel_abort('INIT: wrong dramp_ss')
@@ -1246,8 +1276,22 @@
           call flush(16)
         endif
 
-!       Partition horizontal grid into subdomains
-        call partition_hgrid
+!     Partition horizontal grid into subdomains
+#if defined USE_WWM ||defined USE_SWAN
+      ! JL : perform Domain decomposition using KMETIS on the dual graph.
+      ! JL : See METIS_PartMeshDual in METISLib/meshpart.c
+      ! JL : Ingest a map of relative CPU performance for compute nodes to 
+      ! JL : generate a Load-Balancing partition
+      ! call partition_hgrid_metis_V5
+      call partition_hgrid
+# else
+      ! original SCHISM scheme using the parallel kmetis algorithm.
+      ! See ParMETIS_V3_PartGeomKway in ParMETISlib/gkmetis.c
+      ! JL: may produce discontinuity in partition ? see 
+      ! JL: http://glaros.dtc.umn.edu/gkhome/node/1086 
+      !call partition_hgrid_metis_V5
+      call partition_hgrid
+#endif
 
 !       Aquire full horizontal grid based on partition
         call aquire_hgrid(.true.) 
@@ -1331,7 +1375,7 @@
         if(indvel<0.or.inunfl==1) &
      &call parallel_abort('INIT: quad grid does not work for certain options')
 !'
-#ifdef USE_SED2D
+#if defined USE_SED2D || defined USE_SWAN
         call parallel_abort('INIT:quad not working for certain modules')
 #endif
       endif !lhas_quad
@@ -1416,8 +1460,17 @@
          &  iwater_type(npa),rho_mean(nvrt,nea),erho(nvrt,nea),& 
          & surf_t1(npa),surf_t2(npa),surf_t(npa),etaic(npa),sav_alpha(npa), &
          & sav_h(npa),sav_nv(npa),sav_di(npa),sav_cd(npa), &
-         & wwave_force(2,nvrt,nsa),btaun(npa),stat=istat)
+         & btaun(npa),stat=istat)
       if(istat/=0) call parallel_abort('INIT: other allocation failure')
+
+#if defined USE_WWM || defined USE_SWAN || defined USE_WW3
+      allocate(wwave_force(2,nvrt,nsa),stat=istat)
+      if(istat/=0) call parallel_abort('INIT: WWM alloc failure')
+!#ifdef USE_PAHM
+      allocate(hsmax(npa),dirmax(npa),tpmax(npa),sprmax(npa),stat=istat)
+      if(istat/=0) call parallel_abort('INIT: hsmax alloc failure')
+!#endif
+#endif
 
 !     Tracers
       allocate(tr_el(ntracers,nvrt,nea2),tr_nd0(ntracers,nvrt,npa),tr_nd(ntracers,nvrt,npa),stat=istat)
@@ -1618,6 +1671,23 @@
       endif !lhas_quad
 #endif /*USE_WWM*/
 
+#ifdef USE_SWAN
+     allocate(isonb_w(npa),stat=istat)
+     if(istat/=0) call parallel_abort('MAIN, SWAN: grid geometry arrays allocation failure')
+     if(myrank==0) write(16,*)'isonb_w allocation for SWAN done'
+
+     ! #JL Proposition: Allocate stuff for wave-current in "mod_wave_current"
+     CALL WAVE_CURRENT_SETUP
+     
+     ! Experimental: load a map of roughness Length 'KN' used later in SWAN
+     CALL READ_KN_MAP
+
+     IF (wafo_obcramp == 1) Call READ_WAFO_OPBND_RAMP
+
+     if(myrank==0) write(16,*)'CALL WAVE_CURRENT_SETUP done'
+#endif
+
+
 #ifdef USE_TIMOR
 !     Allocate TIMOR arrays
 #endif 
@@ -1728,7 +1798,16 @@
       cumsum_eta=0.d0
       nsteps_from_cold=0
       wind_rotate_angle=0.d0
+
+#if defined USE_WWM || defined USE_SWAN || defined USE_WW3
       wwave_force=0.d0
+!#ifdef USE_PAHM
+      hsmax=-1.d34
+      tpmax=-1.d34
+      dirmax=-1.d34
+      sprmax=-1.d34
+!#endif
+#endif
 
 !Tsinghua group
 #ifdef USE_SED 
@@ -2181,7 +2260,7 @@
 #endif      
 
 !... Read lat/lon for spectral spatial interpolation  in WWM
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
       if(myrank==0) then
         inquire(file=in_dir(1:len_in_dir)//'hgrid.ll',exist=lexist)
         if(lexist) then
@@ -2275,6 +2354,44 @@
         close(14)
 
 #endif /*USE_WWM*/
+
+#ifdef USE_SWAN
+! SWAN (unswan) convention :
+!     isonb_w(i)=0:  node in the interior computational domain                 !
+!     isonb_w(i)=1:  node on the solid boundary
+!     isonb_w(i)=2:  node on the open boundary
+        isonb_w=0 !not on bnd by default
+        do i=1,npa
+          if(isbnd(1,i)/=0) isonb_w(i)=2 !weed out land/island nodes later
+        enddo!i
+!       Identify island nodes
+        open(14,file='hgrid.gr3',status='old')
+        rewind(14)
+        do i=1,2+np_global+ne_global; read(14,*); enddo;
+        read(14,*); read(14,*);
+        do k=1,nope_global
+          read(14,*) nn
+          do i=1,nn; read(14,*); enddo;
+        enddo !k
+        read(14,*) !nland_global
+        read(14,*) !nvel_global
+        do k=1,nland_global
+          read(14,*) nn,ifl
+          do i=1,nn
+            read(14,*)ipgb
+            if(ifl/=0.and.ipgl(ipgb)%rank==myrank) then !island
+              nd=ipgl(ipgb)%id
+              if(isbnd(1,nd)>0) call parallel_abort('No open bnd on islands for SWAN')
+!'
+              isonb_w(nd)=1
+            endif !ifl
+          enddo !i
+        enddo !k
+        close(14)
+        if(myrank==0) write(16,*)'isonb_w for SWAN populated now'
+
+#endif /*USE_SWAN*/
+
 
 !-------------------------------------------------------------------------------
 ! Read in boundary condition and tidal info
@@ -3328,7 +3445,8 @@
         call mpi_bcast(buf3,ns_global,rtype,0,comm,istat)
 
         do i=1,np_global
-          if(ipgl(i)%rank==myrank) iwater_type(ipgl(i)%id)=buf3(i) !tmp
+          !JL: iwater_type is integer add int()
+          if(ipgl(i)%rank==myrank) iwater_type(ipgl(i)%id)=int(buf3(i)) !tmp
         enddo !i
       endif !ihconsv/
    
@@ -4380,6 +4498,19 @@
 !$OMP end parallel do
       endif !nchi
 
+!J.Lefevre Experimental Add-on begin
+#if 1
+! Update SWAN apparent roughness Length kN from Manning's coefficient
+! Update rough_p from Manning's coefficient to use later in wbl_soulsby
+#ifdef USE_SWAN
+      if (nchi==-1) then
+        if(myrank==0) write(16,*)'Upd. roughness from N to use in SWAN and wbl_soulsby'
+        Call Manning2Madsen
+      endif
+#endif
+#endif
+!J.Lefevre Experimental Add-on end
+
 !...  Calculate mean density profile, and for ihot==0 & flag_ic=2, initialize T,S 
 !...  at nodes and elements as well (which will be over-written for other cases)
       if(ibcc_mean==1.or.ihot==0.and.flag_ic(1)==2) then !T,S share same i.c. flag
@@ -5170,6 +5301,9 @@
       fdb='local_to_global_000000'
       lfdb=len_trim(fdb)
       write(fdb(lfdb-5:lfdb),'(i6.6)') myrank
+
+! JL: Experimental, WRITE in binary (netCDF) format to avoid possible contention with NFS and accelerate 
+#if 0
       open(10,file=out_dir(1:len_out_dir)//fdb,status='replace')
 
 !     header info 
@@ -5219,6 +5353,145 @@
       enddo !i
 
       close(10)
+#else
+      fname = out_dir(1:len_out_dir)//trim(adjustl(fdb))//'.nc'
+
+      iret=nf90_create(trim(adjustl(fname)),OR(NF90_NETCDF4,NF90_CLOBBER),ncid_l2g)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'ns_global',ns_global)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'ne_global',ne_global)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'np_global',np_global)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'nvrt',nvrt)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'nproc',nproc)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'ntracers',ntracers)
+      !iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'ntrs',ntrs(:))
+
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'start_year',start_year)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'start_month',start_month)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'start_day',start_day)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'start_hour',start_hour)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'utc_start',utc_start)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'nrec',nrec)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'dt_nspool',real(dt*nspool))
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'nspool',nspool)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'kz',kz)
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'h0',real(h0))
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'h_s',real(h_s))
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'h_c',real(h_c))
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'theta_b',real(theta_b))
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'theta_f',real(theta_f))
+      iret=nf90_put_att(ncid_l2g,NF90_GLOBAL,'ics',ics)
+      ! write(10,*)(real(ztot(k)),k=1,kz-1),(real(sigma(k)),k=1,nvrt-kz+1) realy usefull ?
+
+      iret=nf90_def_dim(ncid_l2g,'nResident_node',np,node_dim)
+      iret=nf90_def_dim(ncid_l2g,'nResident_elem',ne,elem_dim)
+      iret=nf90_def_dim(ncid_l2g,'nResident_side',ns,side_dim)
+      iret=nf90_def_dim(ncid_l2g,'nVert',nvrt,nvrt_dim)
+      iret=nf90_def_dim(ncid_l2g,'ntracers',ntracers,ntracers_dim)
+      iret=nf90_def_dim(ncid_l2g,'one',1,one_dim)
+      iret=nf90_def_dim(ncid_l2g,'three',3,three_dim)
+      iret=nf90_def_dim(ncid_l2g,'two',2,two_dim)
+      iret=nf90_def_dim(ncid_l2g,'four',4,four_dim)
+
+      if(kz/=1) iret=nf90_def_dim(ncid_l2g,'nz',int(kz-1),nz_dim)
+      iret=nf90_def_dim(ncid_l2g,'nsigma',int(nvrt-kz+1),nsigma_dim)
+
+      iret=nf90_def_var(ncid_l2g,'elem',NF90_INT,(/elem_dim/),nwild(1))
+      iret=nf90_def_var(ncid_l2g,'side',NF90_INT,(/side_dim/),nwild(2))
+      iret=nf90_def_var(ncid_l2g,'node',NF90_INT,(/node_dim/),nwild(3))
+
+      iret=nf90_def_var(ncid_l2g,'xnd',NF90_DOUBLE,(/node_dim/),nwild(4))
+      iret=nf90_def_var(ncid_l2g,'ynd',NF90_DOUBLE,(/node_dim/),nwild(5))
+      iret=nf90_def_var(ncid_l2g,'i34',NF90_INT,(/elem_dim/),nwild(6))
+
+      iret=nf90_def_var(ncid_l2g,'nv',NF90_INT,(/four_dim,elem_dim/),nwild(7))
+      iret=nf90_put_att(ncid_l2g,nwild(7),'long_name','Horizontal Element Table')
+      iret=nf90_put_att(ncid_l2g,nwild(7),'start_index',1)
+      iret=nf90_put_att(ncid_l2g,nwild(7),'_FillValue',-99999)
+
+      iret=nf90_def_var(ncid_l2g,'dp00',NF90_DOUBLE,(/node_dim/),nwild(8))
+      iret=nf90_def_var(ncid_l2g,'kbp00',NF90_INT,(/node_dim/),nwild(9))
+
+      if(kz/=1) iret=nf90_def_var(ncid_l2g,'ztot',NF90_DOUBLE,(/nz_dim/),nwild(10))
+      iret=nf90_def_var(ncid_l2g,'sigma',NF90_DOUBLE,(/nsigma_dim/),nwild(11))
+
+      ! iret=nf90_def_var(   dp00(:),kbp00(:)  ???
+
+      iret=nf90_enddef(ncid_l2g)
+      !Write element map
+      ! CAUTION : recycle nwild2 ??
+      do ie=1,ne
+         nwild2(ie) = ielg(ie)
+      enddo
+
+      iret=nf90_put_var(ncid_l2g,nwild(1),nwild2(1:ne) )
+      !Write side map
+      do isd=1,ns
+         nwild2(isd) = islg(isd)
+      enddo
+      iret=nf90_put_var(ncid_l2g,nwild(2),nwild2(1:ns) )
+      !Write node map
+      do ip=1,np
+         nwild2(ip) = iplg(ip)
+      enddo
+      iret=nf90_put_var(ncid_l2g,nwild(3),nwild2(1:np) )
+
+      ! CAUTION : recycle swild
+      if(ics==1) then
+        do m=1,np
+           swild(m) = real(xnd(m))   !),real(ynd(m)),real(dp00(m)),kbp00(m)
+        enddo !m
+        iret=nf90_put_var(ncid_l2g,nwild(4), swild(1:np) )
+        do m=1,np
+           swild(m) = real(ynd(m))
+        enddo !m
+        iret=nf90_put_var(ncid_l2g,nwild(5), swild(1:np) )
+
+      else ! lat/lon
+        do m=1,np
+           swild(m) = real(xlon(m)/pi*180)   !),real(ynd(m)),real(dp00(m)),kbp00(m)
+        enddo !m
+        iret=nf90_put_var(ncid_l2g,nwild(4), swild(1:np) )
+        do m=1,np
+           swild(m) = real(ylat(m)/pi*180)   !),real(ynd(m)),real(dp00(m)),kbp00(m)
+        enddo !m
+        iret=nf90_put_var(ncid_l2g,nwild(5), swild(1:np) )
+      endif !ics
+
+      !i34
+      iret=nf90_put_var(ncid_l2g,nwild(6),i34(1:ne))
+      !connectivity map
+      do m=1,ne
+         nwild2(1:4) = -99999
+         nwild2(1:i34(m)) = elnode(1:i34(m),m)
+         iret=nf90_put_var(ncid_l2g,nwild(7),nwild2(1:4),start=(/1,m/),count=(/4,1/))
+      enddo !m
+
+      ! dp00
+      do m=1,np
+         swild(m) = real(dp00(m))
+      enddo !m
+      iret=nf90_put_var(ncid_l2g,nwild(8), swild(1:np) )
+      ! kbp00
+      iret=nf90_put_var(ncid_l2g,nwild(9), kbp00(1:np) )
+      ! ztot
+      if(kz/=1) then
+        do m=1,kz-1
+           swild(m) = real(ztot(m))
+        enddo
+        iret=nf90_put_var(ncid_l2g,nwild(10),swild(1:kz-1) )
+      endif
+
+      do m=1,nvrt-kz+1
+         swild(m) = real(sigma(m))
+      enddo
+      iret=nf90_put_var(ncid_l2g,nwild(11),swild(1:nvrt-kz+1))
+
+      iret=nf90_close(ncid_l2g)
+
+      ! This call ensures that all processes wait for each other
+      !CALL MPI_Barrier(MPI_COMM_WORLD, ierr)
+      !if(ierr/=MPI_SUCCESS) call parallel_abort(error=ierr)
+#endif
       
       if(myrank==0) then
         write(16,*)'done initializing cold start'
@@ -6102,6 +6375,9 @@
         call smooth_2dvar(tanbeta_y,npa)
       enddo
 #endif
+#ifdef USE_SWAN
+      if(myrank==0) write(16,*) '!TODO Computation of the bed slope at nodes!'
+#endif
 
 !     Broadcast to global module
       iths_main=iths
@@ -6184,7 +6460,7 @@
       enddo !i
 
 !     Add module outputs of 2D node below (scalars&vectors)
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
       !2D node scalar
       itmp=0 !counter
       do i=1,28
@@ -6279,7 +6555,7 @@
         out_name(ncount_2dnode-1)='waveEnergyDirX'
         out_name(ncount_2dnode)='waveEnergyDirY'
       endif
-#endif /*USE_WWM*/
+#endif /*USE_WWM||USE_SWAN*/
 
 #ifdef USE_SED
       do i=7,13
@@ -6570,7 +6846,7 @@
         out_name(counter_out_name)='horizontalVelY'
       endif
 
-#ifdef USE_WWM
+#if defined USE_WWM|| defined USE_SWAN
       do i=35,36
         if(iof_wwm(i)/=0) then
           ncount_3dnode=ncount_3dnode+2
@@ -6585,7 +6861,7 @@
           endif
         endif !iof_wwm
       enddo !i
-#endif /*USE_WWM*/
+#endif /*USE_WWM||USE_SWAN*/
 
 #ifdef USE_GEN
       do i=1,ntrs(3)
@@ -6722,7 +6998,7 @@
         endif
       enddo !i
 
-#ifdef USE_WWM
+#if defined USE_WWM|| defined USE_SWAN
       if(iof_wwm(33)/=0) then
         ncount_3dside=ncount_3dside+1
         counter_out_name=counter_out_name+1
@@ -6738,7 +7014,7 @@
         out_name(counter_out_name-1)='waveForceX'
         out_name(counter_out_name)='waveForceY'
       endif
-#endif /*USE_WWM*/
+#endif /*USE_WWM||USE_SWAN*/
 
 #ifdef USE_ANALYSIS
       do i=6,13

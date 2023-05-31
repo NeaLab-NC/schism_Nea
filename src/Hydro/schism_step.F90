@@ -103,6 +103,19 @@
       use petsc_schism
 #endif
 
+#ifdef USE_SWAN
+!      use VARS_WAVE, only: curx_wwm,cury_wwm,wwave_force,stokes_hvel
+!      use VARS_WAVE, only: sbr,sbf,jpress,RADFLAG,out_wwm_windpar,out_wwm
+!      use VARS_WAVE, only: stokes_hvel_side,taub_wc,delta_wbl
+!      use VARS_WAVE, only: roller_stokes_hvel_side,eps_r,wave_sbrtot
+!      use VARS_WAVE, only: wave_sbftot,wave_sdstot,wave_svegtot
+!      use VARS_WAVE, only: wave_sintot,stokes_wvel_side,AC2
+      USE VARS_WAVE, ONLY: wwave_force,stokes_hvel,stokes_wvel_side,jpress
+      USE VARS_WAVE, ONLY: sbr,sbf,AC2,out_wwm,out_wwm_windpar,radflag
+      USE MOD_WAVE_CURRENT
+      USE MOD_WAVE_CURRENT      
+#endif      
+
       implicit none
 !#ifndef USE_MPIMODULE
       include 'mpif.h'
@@ -241,6 +254,9 @@
       logical,save :: first_call=.true.
       logical :: ltvd
 
+!#JL Scaled UWind from Zijlema for drag coef calculation (iwind_form=2)
+      real(rkind) :: UZij      
+
       ! Barotropic gradient
       real(rkind) :: bpgr(nsa,2)
 
@@ -255,6 +271,12 @@
 #ifdef USE_WWM
       CHARACTER(LEN=3) :: RADFLAG
 #endif /*USE_WWM*/
+
+#ifdef USE_SWAN
+      INTEGER :: msc2_dim,mdc2_dim
+      ! RADFLAG , see  SWAN/mod_main_wave.F90
+      ! RADFLAG is harcoded in SWAN/mod_main_wave.F90, 'LON' by default
+#endif
 
 #ifdef USE_FABM
       real(rkind) :: tau_bottom_nodes(npa)
@@ -736,8 +758,9 @@
 !-------------------------------------------------------------------------------
 !   Wind wave model (WWM)
 !-------------------------------------------------------------------------------
-#ifdef USE_WWM
+#if defined USE_WWM || USE_SWAN
       !BM: coupling current for WWM
+      !JL: same treatment applied in SWAN for Current
       if (cur_wwm==0) then ! surface currents
         curx_wwm(:)=uu2(nvrt,:)
         cury_wwm(:)=vv2(nvrt,:)
@@ -765,8 +788,9 @@
 !        call exchange_p2d(curx_wwm)
 !        call exchange_p2d(cury_wwm)
 !      end if
+# endif /*  USE_WWM || USE_SWAN*/
 
-
+#ifdef USE_WWM 
       if(mod(it,nstep_wwm)==0) then
         wtmp1=mpi_wtime()
         if(myrank==0) write(16,*)'starting WWM'
@@ -863,6 +887,115 @@
       endif !mod()
 
 #endif /*USE_WWM*/
+!-------------------------------------------------------------------------------
+!   SWAN
+!-------------------------------------------------------------------------------
+#ifdef USE_SWAN
+      if( (ihot/=0.AND.it.EQ.1) .or.     &  ! <- hotstart case! Call SWAN computation
+          (mod(it,nstep_wwm).EQ.0)) then    !    to fill radiation-stress arrays etc.
+
+        wtmp1=mpi_wtime()
+        if(myrank==0) write(16,*)'starting SWAN'
+
+!       call current2wave Kirby done above!'
+
+        CALL SWMAIN_LOOP(it,dt,nstep_wwm)
+        !call SWAN(it,icou_elfe_wwm,dt,nstep_wwm,RADFLAG)
+
+        ! Outputs: (via swanser-> SWANOUT):
+        !  - out_wwm(x,1:35), same fields like those from wwm
+        !  - out_wwm(x,36:46),new wave parameter field (dissipation, Qb, Stokes vel. etc)
+
+!       Compute radiation stress (via mod_wave_current_interaction):
+!
+!       RADFLAG=VOR: Coupling with SCHISM will gives stokes_velocity (Eq. 17 from Bennis 2011),
+!              Wave-induced pressure (Eq. 20) and source momentums (Eq.21)
+        IF (icou_elfe_wwm == 0 .OR. icou_elfe_wwm == 2 .OR. icou_elfe_wwm == 5 .OR. icou_elfe_wwm == 7) THEN
+           wwave_force = 0.0_rkind
+           stokes_hvel = 0.0_rkind
+           jpress      = 0.0_rkind
+           sbr         = 0.0_rkind
+           sbf         = 0.0_rkind
+        ELSE
+           IF (RADFLAG == 'VOR') THEN           ! Vortex force formalism as described in Bennis (2011)
+                                                ! See Implementation in wwm_coupl_selfe.F90
+             CALL STOKES_STRESS_INTEGRAL_SCHISM ! Compute Stokes drift velocities and pressure terms
+             CALL CONSERVATIVE_VF_TERMS_SCHISM ! Conservative terms (relative to Stokes drift advection,
+                                                       ! Coriolis and pressure head: Eq. 17, 19 and 20 from Bennis 2011)
+             IF (fwvor_breaking == 1) CALL BREAKING_VF_TERMS_SCHISM     ! Sink of momentum due to wave breaking and update wwave_force
+
+!#if defined USE_DUCK94 || defined PLANAR_BEACH
+!             CALL DIAG_WVE_FORCE             ! Fill diag_WVE_BAR Buckets for diagnostics
+!#endif
+           ELSEIF(RADFLAG == 'LON') THEN
+             !if(myrank.eq.0) write(16,*)'CALL RADIATION_STRESS_SCHISM'
+             !print*,'CALL RADIATION_STRESS_SCHISM'
+             CALL RADIATION_STRESS_SCHISM
+
+           ELSEIF(RADFLAG == 'WON') THEN !same as LOguet but using unswan method
+             CALL SwanComputeForce
+
+           ENDIF
+
+           !...  Fixing the wave forces at the shoreline (dry/wet boundary)
+           !     If shorewafo == 1, we impose the wave forces to be equal to the  barotropic gradient
+           !     The wwave_force values at the shoreline computed above with hgrad_nodes are hence overwritten
+           IF(SHOREWAFO == 1) CALL SHORELINE_WAVE_FORCES
+
+           ! Apply ramp on wave forces if wafo_obcramp == 1 (in
+           ! param.nml)
+
+           IF(wafo_obcramp == 1) CALL APPLY_WAFO_OPBND_RAMP
+
+        END IF
+
+        !if(myrank==0) write(16,*)'HS',out_wwm(:,1)
+!       Outputs (via SWAN/swanmod2, see sbr SSURF and SBOT):
+!        sbr(2,npa): momentum flux vector due to wave breaking (nearshore depth-induced breaking; see Bennis 2011)
+!        sbf(2,npa): momentum lost by waves due to the bottom friction (not used for the moment)
+!       Outputs (via SWAN/swanser see sbr SWANOUT)
+!        out_wwm_windpar(npa,10): output variables from SWAN (Wind and surf. drag parameters)
+!        out_wwm(npa,30)        : output variables from SWAN (all 2D); see detail above
+!       Outputs (via SWAN/mod_wave_current_interaction):
+!        stokes_vel(2,nvrt,npa): Stokes velocity
+!        jpress(npa): waved-induced pressure, see 'STOKES_STRESS_INTEGRAL_SCHISM, ONLY'
+!        wwave_force(2,nvrt,nsa): = 0 if icou_elfe_wwm=0. In [e,p]frame (not sframe!).
+!        wwave_force(1:2,:,1:nsa) = Rsx, Rsy in my notes (the terms in momen. eq.)
+!        and has a dimension of m/s/s. This is overwritten under Vortex formulation later.
+
+        if(myrank==0) write(16,*)'SWAN part took (sec) ',mpi_wtime()-wtmp1
+        !print*,'SWAN part took (sec) ',mpi_wtime()-wtmp1
+#if 0
+        !Check outputs from SWAN
+        !sum1=sum(out_wwm_windpar(1:npa,1:10))
+        sum2=sum(wwave_force)
+        sum3=sum(out_wwm(:,1:35))
+        !if(sum1/=sum1.or.sum2/=sum2.or.sum3/=sum3) then
+        if(sum2/=sum2.or.sum3/=sum3) then
+        !  if(sum1/=sum1) then
+        !    do i=1,9
+        !      write(12,*)'sum1:',i,sum(out_wwm_windpar(:,i))
+        !    end do
+        !  endif
+          if(sum3/=sum3) then
+            do i=1,31
+              sum4=sum(out_wwm(:,i))
+              write(12,*)'sum4:',i,sum4
+              if(sum4/=sum4) then
+                do j=1,npa
+                  write(12,*)i,j,out_wwm(j,i)
+                enddo !j
+              endif
+            enddo !i
+          endif !sum3
+          !write(errmsg,*)'NaN from SWAN:',sum1,sum2,sum3
+          write(errmsg,*)'NaN from SWAN:',sum2,sum3
+          call parallel_abort(errmsg)
+        endif !sum
+#endif
+
+      endif !mod()
+#endif /*USE_SWAN*/
 
 !...  compute wind stress components (in lat/lon frame if ics=2; in map projection E-N direction if ics=1)
       dragcmin=1.0d-3*(0.61d0+0.063d0*6.d0)
@@ -903,14 +1036,35 @@
             dragcoef=max(dragcoef,4.d-4)
             tau(1,i)=dragcoef*0.001293d0*wmag*windx(i)*rampwind
             tau(2,i)=dragcoef*0.001293d0*wmag*windy(i)*rampwind
+          else if(iwind_form==2) then !Zijlema et al. Parameterization
+            !See An Exploration of Wind Stress Calculation Techniques in Hurricane Storm Surge Modeling
+            !Uref  = 31.5 ! m/s
+            UZij = wmag/31.5d0
+            dragcoef=1.0d-3*(0.55d0+2.97d0*UZij-1.49d0*UZij*UZij)
+            dragcoef=max(dragcoef,4.d-4)
+            tau(1,i)=dragcoef*0.001293d0*wmag*windx(i)*rampwind
+            tau(2,i)=dragcoef*0.001293d0*wmag*windy(i)*rampwind
+          else if(iwind_form==3) then ! Wu 1982, Like in SWAN model
+            if(wmag>7.5d0) then
+              dragcoef=(0.8d0+0.065d0*wmag) * 1.0d-3
+            else
+              dragcoef=0.0012873d0
+            endif
+            dragcoef=max(dragcoef,4.d-4)
+            tau(1,i)=dragcoef*0.001293d0*wmag*windx(i)*rampwind
+            tau(2,i)=dragcoef*0.001293d0*wmag*windy(i)*rampwind
+          else if(iwind_form==4) then ! Garrison, Like in POM08 model
+            dragcoef=(0.950d0+.067d0*wmag)* 1.0d-3
+            tau(1,i)=dragcoef*0.001293d0*wmag*windx(i)*rampwind
+            tau(2,i)=dragcoef*0.001293d0*wmag*windy(i)*rampwind
           endif !iwind_form
         endif !nws
       enddo !i=1,npa
 !$OMP end do
 
-!     Overwrite by WWM values
-#ifdef USE_WWM
-      if(icou_elfe_wwm>0.and.iwind_form<=-2) then 
+!     Overwrite by WWM or SWAN values
+#if defined USE_WWM || defined USE_SWAN
+      if(icou_elfe_wwm>0.and.iwind_form==-2) then 
 !$OMP   do
         do i=1,npa
           if(idry(i)==1) then
@@ -1920,7 +2074,7 @@
         ! Deal with Stokes drift at open boundaries (KM)
         ! Subtract depth-averaged Stokes drift vel per Bennis et al. (2011) and
         ! Kevin Martin
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
         if(RADFLAG.eq.'VOR') then
           tmpx = 0.d0; tmpy = 0.d0;
           do k=kbs(i),nvrt-1
@@ -2398,7 +2552,7 @@
 !                Cdp(i)=Cdp(i)*exp(dzb_decay*(1.d0-bthick_ori/bthick))
 !              endif
               !WBL
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
               ! Quantities used in both formulations for the WBL
               ubm = out_wwm(i,22)    ! orbital vel.
               if(out_wwm(i,12)==0.d0) then
@@ -2430,7 +2584,7 @@
                 delta_wbl(i) = 0.09D0*30.D0*rough_p(i)*(aorb/(30.D0*rough_p(i)))**0.82D0
               endif !iwbl             
 
-#endif /*USE_WWM*/
+#endif /*USE_WWM || USE_SWAN*/
             endif !bthick
           endif !rough_p
 
@@ -2449,7 +2603,7 @@
         if(it==iths_main+1) write(12,*)'Cd min/max at 1st step= ',minval(Cdp),maxval(Cdp)
 
 !       Output warning for WBL if iteration didn't converge
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
         if(iwbl==1) then
            ltmp1(1)=ltmp
            call mpi_reduce(ltmp1,ltmp2,1,MPI_LOGICAL,MPI_LOR,0,comm,ierr)
@@ -2457,7 +2611,7 @@
            if(myrank==0) write(16,*)'Cumulative max. for GM iteration for rank 0= ',iwbl_itmax
 !'
         endif !iwbl
-#endif /*USE_WWM*/
+#endif /*USE_WWM||USE_SWAN*/
       endif !nchi==1
 
 !     Dump Cdp for diagnostics
@@ -2630,7 +2784,7 @@
 !         March 2022, LRU team update :
 !           * 2 options for prescribing the flux of tke
 !           * tested with GOTM v5.2
-#ifdef USE_WWM
+#if defined USE_SWAN || defined USE_WWM
 !...      At the surface, flux of TKE imposed as a function of breaking
 !wave-induced
 !         energy dissipation ie depth-induced breaking (+roller) + whitecapping:
@@ -2639,7 +2793,14 @@
 !         turbinjds is the % of energy dissipated through wcapping (100%)
 !         injected (set in param.nml)
 !...      Option 1 : Feddersen's fashion (e.g. Feddersen and Trowbridge, 2005)
+
+#ifdef USE_SWAN
+          u_taus=sqrt( turbinj*sqrt(sbr(1,j)**2.d0+sbr(2,j)**2.d0) &
+               &        + sqrt(tau(1,j)**2+tau(2,j)**2) )
+          if(myrank.eq.0.and.j.eq.npa) write(16,*)'!TODO u_taus=f(eps_br,wave_sdstot)'
+#else
           u_taus=((1.d0/cw)*turbinj*eps_br(j)+(1.d0/cw)*turbinjds*(-wave_sdstot(j)/rho0))**(1.d0/3.d0)
+#endif
 !...      Option 2 : Mellor's fashion (e.g. Newberger and Allen, 2007)
 !          u_taus=sqrt(sqrt(srol(1,j)**2+srol(2,j)**2))
 !          u_taus=sqrt(sqrt(sbr(1,j)**2+sbr(2,j)**2))
@@ -2660,7 +2821,7 @@
 #else
           u_taus=sqrt(sqrt(tau(1,j)**2.d0+tau(2,j)**2.d0))
           u_taub=sqrt(Cdp(j)*(uu2(kbp(j)+1,j)**2.d0+vv2(kbp(j)+1,j)**2.d0))
-#endif
+#endif /*USE_SWAN||USE_WWM*/
           nlev=nvrt-kbp(j) !>1
           do k=0,nlev 
             klev=k+kbp(j) !kbp <= klev <= nvrt
@@ -2695,7 +2856,8 @@
             endif
             tke1d(k)=q2(klev,j)
             L1d(k)=xl(klev,j)
-            if(tke1d(k)<0.d0.or.L1d(k)<=0.d0) then
+!            if(tke1d(k)<0.d0.or.L1d(k)<=0.d0) then  ! JL failed with GOTM4.0
+            if(tke1d(k)<0.d0.or.L1d(k)<0.d0) then    ! JL Fix
               write(errmsg,*)'Negative tke,mixl:',tke1d(k),L1d(k),iplg(j),klev
               call parallel_abort(errmsg)
             endif
@@ -2711,16 +2873,18 @@
 !          h1d(0)=h1d(1)
           toth=eta2(j)+dp(j)
 !         surface and bottom roughness length (m)
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
           ! alphaw set in param.nml
           if (alphaw .gt. 0.d0) then
             z0s=alphaw * out_wwm(j,1)  ! e.g. Moghimi et al. (OM, 2013)
+            !z0s=max(0.01d0,z0s) ! + modif JL (max(1cm,...), personal choice
           else
             z0s=abs(alphaw)
           endif
 #else
           z0s=min(0.1d0,toth/10.d0)
-#endif
+#endif     /* USE_WWM || USE_SWAN */
+
           if(Cdp(j)==0.d0) then
             z0b=0.d0
           else
@@ -2886,12 +3050,13 @@
 !	b.c. (computed using values from previous time except wind)
         ! At the surface
         q2fs  = 0.5d0*16.6d0**(2.d0/3.d0)*sqrt(tau(1,j)**2.d0+tau(2,j)**2.d0) !Eq. (10) of Zhang & Baptista (2008)
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
+        if(myrank==0.and.j.EQ.npa) &
+        write(16,*) '3DH, Adding wave breaking induced turbulence (MYG-UB)...'
         ! Adding wave breaking-induced turbulence (T. Guérin) as a partial sink of momentum; Unit [m2.s-2].
         ! By default, it is fixed at 15% (Feddersen, 2012), but can be adjusted in param.in depending on the wave breaking type.
         q2fs = q2fs + 0.5d0*16.6d0**(2.d0/3.d0)*turbinj*sqrt(sbr(1,j)**2.d0+sbr(2,j)**2.d0)
-
-#endif
+#endif /* USE_WWM ||  USE_SWAN*/
 
         q2bot = 0.5d0*16.6d0**(2.d0/3.d0)*Cdp(j)*(uu2(kbp(j)+1,j)**2.d0+vv2(kbp(j)+1,j)**2.d0)
         ! Limiters
@@ -2904,7 +3069,7 @@
 !        xlbot = max(xlmin2(j),min(2.5_rkind,xlsc0*z0b_save(j))*0.4_rkind)
 
         ! Surface mixing length (T. Guérin)
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
         ! 0.6Hs, following Terray et al. (1996), and used by Bennis et al. (2014) and Moghimi et al. (2016)
         zsurf = 0.6d0*out_wwm(j,1) 
 #else
@@ -3230,7 +3395,7 @@
 
 !        xlfs=max(xlmin2(j),xlsc0(j)*dzz(nvrt)*0.4_rkind) 
 !modif AD :: modification of mixing layer as Delpey et al.
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
         tmp0=out_wwm(j,1) !Hs
         zsurf=0.2d0*tmp0
 #else
@@ -5561,7 +5726,7 @@
 #endif /*USE_SED*/
 
 !         Radiation stress
-#if defined USE_WWM || defined USE_WW3
+#if defined USE_WWM || defined USE_WW3 || defined USE_SWAN
           !No quads
 !          rs1=0
 !          rs2=0
@@ -5582,7 +5747,7 @@
 !          bigf2=bigf2+rs2
           botf1=botf1+wwave_force(1,kbs(isd)+1,isd) 
           botf2=botf2+wwave_force(2,kbs(isd)+1,isd)
-#endif /*USE_WWM*/
+#endif /*USE_WWM || USE_WW3 || USE_SWAN*/
 
           !hvis
           do k=kbs(isd),nvrt
@@ -5866,8 +6031,7 @@
               qel(i)=qel(i)+(eta2(nd)+tmp2)*swild10(1,l)-eta2(nd)*grav3*thetai*(1.d0-thetai)*dt*dt*hhatb*swild10(2,l)
             enddo !l
           endif !i34       
-
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
           if(RADFLAG.eq.'VOR'.and.idry_e(ie)==0) then
             sum1=0.d0; sum2=0.d0 !in eframe
             do m=1,i34(ie) !wet sides
@@ -5884,7 +6048,7 @@
             dot3=(dldxy(id,1,ie)*sum1+dldxy(id,2,ie)*sum2)/dble(i34(ie))
             qel(i)=qel(i)+dt*dot3*area(ie)
           endif
-#endif
+#endif /*USE_WWM || USE_SWAN*/
 
 !...      I_7: Impose Point Source volume
           qel(i)=qel(i)+dt/real(i34(ie),rkind)*vsource(ie)           
@@ -5979,7 +6143,7 @@
               Unbar=bigu(1,isd)*snx(isd)+bigu(2,isd)*sny(isd)
               tmp0=(1-thetai)*dt*distj(isd)*Unbar/2.d0
               !Overwrite tmp0 for vortex formulation
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
               if(RADFLAG.eq.'VOR') then
                 sum1=0.d0 !integral; x-comp.
                 sum2=0.d0 !integral
@@ -5994,7 +6158,7 @@
                 Unbar=sum1*snx(isd)+sum2*sny(isd)
                 tmp0=thetai*dt*distj(isd)*Unbar/2.d0
               endif !RADFLAG
-#endif/*USE_WWM*/
+#endif /*USE_WWM||USE_SWAN*/
 
               qel(i)=qel(i)-tmp0 !(1-thetai)*dt*distj(isd)*Unbar/2
             endif !I_5
@@ -6186,6 +6350,16 @@
       do i=1,np
         if(eta2(i)>elevmax(i)) elevmax(i)=eta2(i) !only for residents
 
+#if defined USE_SWAN || defined USE_WWM
+!#ifdef USE_PAHM
+        if(out_wwm(i,1)>hsmax(i)) then 
+           hsmax(i) = out_wwm(i,1)  ! Hs (m)
+           dirmax(i)= out_wwm(i,18) ! Peak (dominant) direction (degr)
+           tpmax(i) = out_wwm(i,12) ! Peak Period (s)
+           sprmax(i)= out_wwm(i,19) ! Peak Directional spreading (degr)
+        endif
+!#endif
+#endif
         if(associated(ipgl(iplg(i))%next)) then !interface node
           if(ipgl(iplg(i))%next%rank<myrank) cycle !already in the sum so skip
         endif
@@ -6417,11 +6591,11 @@
           hat_gam_y=sdbt(2,nvrt,j)+dt*(-cori(j)*su2(nvrt,j)-dpr_dy(j)/rho0+grav3*detp_dy(j)+ &
      &bcc(2,kbs(j),j)+tauy2/htot)-grav3*(1-thetai)*dt*deta1_dy(j)-grav3*thetai*dt*deta2_dy(j)
 !         Radiation stress
-#if defined USE_WWM || defined USE_WW3
+#if defined USE_WWM || defined USE_WW3 ||defined USE_SWAN
           !wwave_force in eframe
           hat_gam_x=hat_gam_x+dt*wwave_force(1,1,j) 
           hat_gam_y=hat_gam_y+dt*wwave_force(2,1,j)
-#endif /*USE_WWM*/
+#endif /*USE_WWM||USE_WW3||USE_SWAN*/
 
           !hvis
           hat_gam_x=hat_gam_x+dt*d2uv(1,nvrt,j)
@@ -6567,12 +6741,12 @@
           endif !ibc==0
 
 !         Radiation stress
-#if defined USE_WWM || defined USE_WW3
+#if defined USE_WWM || defined USE_WW3 || defined USE_SWAN
           if(k<nvrt) rrhs(1:2,kin)=rrhs(1:2,kin)+dzz(k+1)/6.d0*dt* &
      &(2.d0*wwave_force(1:2,k,j)+wwave_force(1:2,k+1,j))
           if(k>kbs(j)+1) rrhs(1:2,kin)=rrhs(1:2,kin)+dzz(k)/6.d0*dt* &
      &(2.d0*wwave_force(1:2,k,j)+wwave_force(1:2,k-1,j))
-#endif /*USE_WWM*/
+#endif /*USE_WWM||USE_WW3||USE_SWAN*/
         enddo !k=kbs(j)+1,nvrt
 
         call tridag(nvrt,2,ndim,2,alow,bdia,cupp,rrhs,soln,gam)
@@ -6670,12 +6844,12 @@
             if(islip==0) then !free slip
               vnorm=0.d0 !for most cases
               !Normal component from vortex formulation
-#ifdef USE_WWM
+#if defined USE_WWM|| defined USE_SWAN
               if(RADFLAG.eq.'VOR') then
                 vnorm=stokes_hvel_side(1,k,j)*snx(j)+stokes_hvel_side(2,k,j)*sny(j)+ &
      &roller_stokes_hvel_side(1,k,j)*snx(j)+roller_stokes_hvel_side(2,k,j)*sny(j)
               endif !RADFLAG
-#endif               
+#endif  /*  USE_WWM || USE_SWAN */           
 
               !Tangential dir is (-sny,snx)
               vtan=-su2(k,j)*sny(j)+sv2(k,j)*snx(j)
@@ -6903,14 +7077,14 @@
 !     Add Stokes drift to horizontal vel for wvel and transport; will restore
 !     after transport. Temporarily save original Eulerian vel s[uv]2 as bcc for
 !     F.V. calculation below
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
       if(RADFLAG.eq.'VOR') then
         bcc(1,:,1:nsa)=su2
         bcc(2,:,1:nsa)=sv2
         su2=su2+stokes_hvel_side(1,:,:)
         sv2=sv2+stokes_hvel_side(2,:,:)
       endif
-#endif
+#endif /* USE_WWM || USE_SWAN */
 
 !...  solve for vertical velocities using F.V.
 !...  For hydrostatic model, this is the total Lagrangian vertical vel
@@ -6923,9 +7097,9 @@
 
 !$OMP workshare
       we=0.d0 !for dry and below bottom levels; in eframe if ics=2
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
       dr_dxy=0.d0 !Eulerian wvel
-#endif
+#endif /* USE_WWM || USE_SWAN */
       flux_adv_vface=-1.d34 !used in transport; init. as flags
 !$OMP end workshare
 
@@ -6986,7 +7160,7 @@
           if(ics==1) then
             ubar=ubar+su2(kbs(isd),isd)*i34inv 
             vbar=vbar+sv2(kbs(isd),isd)*i34inv
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
             ubar2=ubar2+bcc(1,kbs(isd),isd)*i34inv
             vbar2=vbar2+bcc(2,kbs(isd),isd)*i34inv
 #endif
@@ -6994,7 +7168,7 @@
             call project_hvec(su2(kbs(isd),isd),sv2(kbs(isd),isd),sframe2(:,:,isd),eframe(:,:,i),vn1,vn2)
             ubar=ubar+vn1*i34inv
             vbar=vbar+vn2*i34inv
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
             call project_hvec(bcc(1,kbs(isd),isd),bcc(2,kbs(isd),isd),sframe2(:,:,isd),eframe(:,:,i),vn1,vn2)
             ubar2=ubar2+vn1*i34inv
             vbar2=vbar2+vn2*i34inv
@@ -7011,13 +7185,13 @@
           ubed=swild(1); vbed=swild(2); wbed=swild(3)
           bflux0=ubed*sne(1,kbe(i))+vbed*sne(2,kbe(i))+wbed*sne(3,kbe(i)) !normal bed vel.
           we(kbe(i),i)=wbed
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
           dr_dxy(1,kbe(i),i)=wbed
 #endif
         else
           !Error: /=0 for 2D (but OK b/cos fluxes are 0 below for transport)
           we(kbe(i),i)=(av_bdef2-av_bdef1)/dt-dhdx*ubar-dhdy*vbar
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
           dr_dxy(1,kbe(i),i)=(av_bdef2-av_bdef1)/dt-dhdx*ubar2-dhdy*vbar2
 #endif
         endif
@@ -7038,7 +7212,7 @@
             vnor1=su2(l,jsj)*snx(jsj)+sv2(l,jsj)*sny(jsj)
             vnor2=su2(l+1,jsj)*snx(jsj)+sv2(l+1,jsj)*sny(jsj)
             sum1=sum1+ssign(j,i)*(zs(max(l+1,kbs(jsj)),jsj)-zs(max(l,kbs(jsj)),jsj))*distj(jsj)*(vnor1+vnor2)/2.d0
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
             vnor1=bcc(1,l,jsj)*snx(jsj)+bcc(2,l,jsj)*sny(jsj)
             vnor2=bcc(1,l+1,jsj)*snx(jsj)+bcc(2,l+1,jsj)*sny(jsj)
             sum2=sum2+ssign(j,i)*(zs(max(l+1,kbs(jsj)),jsj)-zs(max(l,kbs(jsj)),jsj))*distj(jsj)*(vnor1+vnor2)/2.d0
@@ -7050,7 +7224,7 @@
               ubar1=ubar1+su2(l+1,jsj)*i34inv 
               vbar=vbar+sv2(l,jsj)*i34inv 
               vbar1=vbar1+sv2(l+1,jsj)*i34inv 
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
               ubar2=ubar2+bcc(1,l,jsj)*i34inv 
               ubar3=ubar3+bcc(1,l+1,jsj)*i34inv 
               vbar2=vbar2+bcc(2,l,jsj)*i34inv 
@@ -7063,7 +7237,7 @@
               vbar=vbar+vn2*i34inv
               ubar1=ubar1+tt1*i34inv
               vbar1=vbar1+ss1*i34inv
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
               call project_hvec(bcc(1,l,jsj),bcc(2,l,jsj),sframe2(:,:,jsj),eframe(:,:,i),vn1,vn2)
               call project_hvec(bcc(1,l+1,jsj),bcc(2,l+1,jsj),sframe2(:,:,jsj),eframe(:,:,i),tt1,ss1)
               ubar2=ubar2+vn1*i34inv
@@ -7078,7 +7252,7 @@
           if(l==kbe(i)) then
             bflux=(av_bdef2-av_bdef1)/dt
             if(imm==2) bflux=bflux0
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
             bflux2=bflux
 #endif
           else
@@ -7087,14 +7261,14 @@
             !large w-vel, but flux balance is not affected (nor is
             !transport)
             bflux=ubar*sne(1,l)+vbar*sne(2,l)+we(l,i)*sne(3,l)
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
             bflux2=ubar2*sne(1,l)+vbar2*sne(2,l)+dr_dxy(1,l,i)*sne(3,l)
 #endif
           endif
 
           we(l+1,i)=(-sum1-(ubar1*sne(1,l+1)+vbar1*sne(2,l+1))*area_e(l+1) + &
      &bflux*area_e(l))/sne(3,l+1)/area_e(l+1)
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
           dr_dxy(1,l+1,i)=(-sum2-(ubar3*sne(1,l+1)+vbar3*sne(2,l+1))*area_e(l+1) + &
      &bflux2*area_e(l))/sne(3,l+1)/area_e(l+1)
 #endif
@@ -7963,7 +8137,7 @@
       if(myrank==0) write(16,*)'done solving transport equation'
 
 !     Restore 3D Eulerian vel
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
       if(RADFLAG.eq.'VOR') then
         su2=su2-stokes_hvel_side(1,:,:)
         sv2=sv2-stokes_hvel_side(2,:,:)
@@ -8587,6 +8761,21 @@
       enddo !i
 !$OMP end do
 
+
+!J.Lefevre Experimental Add-on begin
+!#if 1
+! Update apparent roughness Length "kN" from Manning's coefficient for SWAN
+! Update "rough_p" from Manning's coefficient to use later in wbl_soulsby
+!#ifdef USE_SWAN
+!   if (nchi==-1) then
+!      if(myrank==0) write(16,*)'Upd. roughness from N to use in SWAN and wbl_soulsby'
+!      Call Manning2Madsen
+!   endif
+!#endif
+!#endif
+!J.Lefevre Experimental Add-on end
+
+
 !...  Optional computation of fluxes and total volume etc.
       if(iflux/=0) then
 !--------------------------------------------------
@@ -9093,7 +9282,7 @@
         noutput=noutput+13
 #endif
 
-#if defined USE_WWM || defined USE_WW3
+#if defined USE_WWM || defined USE_WW3 || defined USE_SWAN
         icount=0
         do i=1,28
           if(i==7.or.i==8) cycle !skip vectors first  
@@ -9145,9 +9334,17 @@
         !2D vectors
         noutput=noutput+1
         icount=icount+1
+#ifdef USE_SWAN
+!JL SWAN : out_wwm(:,8) = ETOTC ; out_wwm(:,7) = ETOTS
         if(iof_wwm(icount)==1) call writeout_nc(id_out_var(noutput+4), &
      &'WWM_energy_dir',1,1,npa,dble(out_wwm(:,8)),dble(out_wwm(:,7)))
+#else
+!JL Fix  : wwm_output : OUTPAR(7)  = ETOTC     ! Etot energy in horizontal direction (X)
+                    !   OUTPAR(8)  = ETOTS     ! Etot energy in vertical direction (Y)
+        if(iof_wwm(icount)==1) call writeout_nc(id_out_var(noutput+4), &
+     &'WWM_energy_dir',1,1,npa,dble(out_wwm(:,7)),dble(out_wwm(:,8)))
 
+#endif
         !3D
         ! Vertical Stokes velocity at sides
         noutput=noutput+1
@@ -9363,7 +9560,7 @@
         enddo !i=13,16
 
 !       Add module outputs of 2D node below (scalars&vectors)
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
         !scalar
         itmp=0 !counter
         do i=1,28
@@ -9403,7 +9600,7 @@
           varout_2dnode(icount-1,:)=out_wwm(1:np,8)
           varout_2dnode(icount,:)=out_wwm(1:np,7)
         endif !iof_wwm
-#endif /*USE_WWM*/
+#endif /*USE_WWM||USE_SWAN*/
 
 #ifdef USE_SED
       do i=7,13
@@ -9804,7 +10001,7 @@
         enddo !i
 
         !Modules
-#ifdef USE_WWM
+#if defined USE_WWM|| defined USE_SWAN
       !Vectors
       do i=35,36
         if(iof_wwm(i)/=0) call savensend3D_scribe(icount,1,2,nvrt,np,stokes_hvel(1,:,1:np),stokes_hvel(2,:,1:np))
@@ -9835,7 +10032,7 @@
 !          enddo !j
 !        endif !iof_wwm
       enddo !i
-#endif /*USE_WWM*/
+#endif /*USE_WWM||USE_SWAN*/
 
 #ifdef USE_GEN
         do i=1,ntrs(3)
@@ -10001,7 +10198,7 @@
         enddo !i
      
         !Modules
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
         if(iof_wwm(33)/=0) call savensend3D_scribe(icount,3,1,nvrt,ns,stokes_wvel_side(:,1:ns))
 !          icount=icount+1
 !          nsend_varout=nsend_varout+1
@@ -10026,7 +10223,7 @@
 !     &200+nsend_varout,comm_schism,srqst7(nsend_varout),ierr)
 !          enddo !j
 !        endif !iof_wwm
-#endif /*USE_WWM*/
+#endif /*USE_WWM||USE_SWAN*/
 
 #ifdef USE_ANALYSIS
       do i=6,13
@@ -10442,6 +10639,22 @@
         !do i=1,ns
         !  write(12,*)'side uv=',i,xcj(i),ycj(i),su2(nvrt,i),sv2(nvrt,i)
         !enddo !i
+
+!JL write AC2 to restart SWAN
+#ifdef USE_SWAN
+        !Reenter def mode
+        j=nf90_redef(ncid_hot)
+        j=nf90_def_dim(ncid_hot,'ndir',mdc2,mdc2_dim)
+        j=nf90_def_dim(ncid_hot,'nfreq',msc2,msc2_dim)
+
+        var3d_dim(1)=mdc2_dim; var3d_dim(2)=msc2_dim; var3d_dim(3)=node_dim
+        j=nf90_def_var(ncid_hot,'AC2',NF90_DOUBLE,var3d_dim,nwild(nvars_hot+1))
+        j=nf90_enddef(ncid_hot)
+        j=nf90_put_var(ncid_hot,nwild(nvars_hot+1),AC2,(/1,1,1/),(/mdc2,msc2,np/))
+        !'long_name',values='Wave Spectral Density'
+        !'units',values='m^2/hz^2'
+        nvars_hot=nvars_hot+1 !update
+#endif /*USE_SWAN*/
 
 #ifdef USE_ICM
         !Reenter def mode

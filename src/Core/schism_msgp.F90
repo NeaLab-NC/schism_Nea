@@ -352,7 +352,7 @@ module schism_msgp
   public :: exchange_p3d_3          ! 3Dx3 ghost node exchange of type (3,nvrt,nm) where nm>=npa
   public :: exchange_p3d_4          ! 3Dx4 ghost node exchange of type (4,nvrt,nm) where nm>=npa
   public :: exchange_p3d_tr         ! 3D x ntracers ghost node exchange of type (ntracers,nvrt,nm) where nm>=npa
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
   public :: exchange_p4d_wwm        ! ghost node exchange of type (msc2,mdc2,nm) where nm>=npa
   public :: exchange_p3d_wwm        ! ghost node exchange of type (mdc2,nm) where nm>=npa
 #endif
@@ -2724,7 +2724,7 @@ endif !ntracers>0
   !-----------------------------------------------------------------------------
   ! Setup Node Message-Passing for WWM of type (msc2,mdc2,nm) (nm>=npa)
   !-----------------------------------------------------------------------------
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
   if(msc2*mdc2<1) call parallel_abort('msgp_init: msc2*mdc2<1')
   ! 3D-whole-level node comm request and status handles
   allocate(p4d_wwm_send_rqst(nnbr_p),stat=stat)
@@ -2819,7 +2819,7 @@ endif !ntracers>0
       if(ierr/=MPI_SUCCESS) call parallel_abort('msgp_init: commit p3d_wwm_recv_type',ierr)
     endif
   enddo !i
-#endif /*USE_WWM*/
+#endif /*USE_WWM || USE_SWAN*/
 
   !-----------------------------------------------------------------------------
   ! Setup 3D tracer transport element Message-Passing (the order of indices must be (mntr,nvrt,nm), where nm>=nea).
@@ -3860,7 +3860,7 @@ subroutine exchange_p3d_tr(p3d_tr_data)
 
 end subroutine exchange_p3d_tr
 
-#ifdef USE_WWM
+#if defined USE_WWM || defined USE_SWAN
 subroutine exchange_p4d_wwm(p4d_wwm_data)
 !-------------------------------------------------------------------------------
 ! Node Exchange for WWM
@@ -3942,7 +3942,7 @@ subroutine exchange_p3d_wwm(p3d_wwm_data)
 
 end subroutine exchange_p3d_wwm
 
-#endif /*USE_WWM*/
+#endif /*USE_WWM ||USE_SWAN*/
 
 !subroutine exchange_e3d_tr(e3d_tr_data)
 !!-------------------------------------------------------------------------------

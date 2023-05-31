@@ -1,0 +1,149 @@
+Changes made by IRD Noumea to propose SWAN as a second alternative for Current-Wave coupling
+============================================================================================
+!     SWAN (Simulating WAves Nearshore); a third generation wave model
+!     Copyright (C) 1993-2017  Delft University of Technology
+!
+!     SWAN from DELFT, REVISION:  41.20
+!
+!     A modified version for coupling with SCHISM by Jerome Lefevre, IRD Noumea
+!     see comments marked with JL in "swanmain.F90" etc.
+!
+!     Solvers supported in SCHISM-SWAN coupling : Strongly Implicit Solver (SIP) only
+!     Grids supported in SCHISM-SWAN coupling : Unstructured, triangles only (Quads not supported)
+!     (SCHISM and SWAN share the same grid)
+!
+!     contact: jerome.lefevre@ird.fr
+
+# SWAN Implementation in SCHISM 
+# -----------------------------
+# To activate SWAN, the same logic as WWM is applied:
+# - checkout "mk/include_modules", set "USE_SWAN", unset "USE_WWM" and recompile
+# It is worthwile that WWM and SWAN share same common blocks in schism_step, schism_init, misc_subs ... 
+# by using CPP flags:  #if defined USE_WWM || defined USE_SWAN 
+                            ...
+                       #endif /* USE_WWM ||USE_SWAN */ 
+# One can track code modification with "grep USE_SWAN Hydro/*" ; "grep USE_SWAN Core/*" ...
+# Caution : no wwminput.nml is required but two mandatories: "INPUT" and "swaninit" files are required
+# Caution : fully tested in mpi, not in hybrid mpi/omp mode
+
+# Run instruction
+# ---------------
+# As detailled in the SWAN Implementaion Manual, users need two mandatories files: INPUT and swaninit 
+# Two examples are given in ../sample_inputs/swan_templates:  "INPUT" and "swaninit"
+# The "Section 3. Input" in file INPUT allows user to prescribe elevation, current, friction, wind  
+# using original SWAN files in ASCII. In Schism-Swan, these forcing are passed through schism to SWAN 
+# from a bunch of netcdf forcing files, as required in Schism. It is safe to comment or not apply changes 
+# in "Section 3. Input". 
+# The "Section 3. BOUNDARY FORCING" is the more relevant for Wave forcing to schism-Swan. See details in 
+# bullet 8, below. NetCDF files for Wave forcing used in schism-WWM are also supported in schism-SWAN.
+
+# ToDo
+# ----
+# A benchmark in Test_Verification for schism-swan,
+# A wwminput.nml with SWAN settings,  
+# SWAN upgrade from 41.20 to the last one,
+# Better Hybrid support for MPI/OMP,
+# Better control on nodes where to place wave forcing (same logic as in WWM),
+# Cosmetic changes
+
+
+1.	Option for the coupling current send back from WWM or SWAN to SCHISM. See "cur_wwm" in param.nml: 
+=0: surface current 
+=1: depth-integrated current
+=2: current computed according to Kirby & Chen (1989) where the integration depth depends on the wave numbers, to possibly account for the influence of sheared currents on wave propagation.
+
+
+2.	Option ZPROF_BREAK to manage the vertical distribution function of the wave breaking acceleration term : checkout "ZPROF_BREAK" in SWAN/mod_main_wave.F90 and recompile
+= 1: homogeneous over the water column
+= 2 to 5: functions cosh or 1-tanh (e.g. Uchiyama et al., 2010)
+= 6: only applied in the 2 surface layers of the water column
+Default = 6
+
+3. Three current-wave coupling implemented : checkout "RADFLAG" in SWAN/mod_main_wave.F90 and recompile 
+RADFLAG  = 'LON': Similar Longuet-Higgins scheme as in WWM 
+RADFLAG  = 'WON': Similar Longuet-Higgins scheme hacked from SWAN-ADCIRC 
+RADFLAG  = 'VOR': Similar Vortex-Force scheme as in WWM
+Default = 'VOR'
+
+4.	Kévin’s work on the wave roller: ROLMETHOD (= 1 or 2): NOT IMPLEMENTED in Schism-SWAN yet! see IROLLER=0 in SWAN/mod_main_wave.F90
+
+
+5.	Options to activate/deactivate the different terms involved in the vortex force (in param.nml): implemented in Schism-SWAN, but not fully tested
+fwvor = 0/1 ! activate/deactivate wave forces
+fwvor_advxy_stokes = 0/1 ! then activate/deactivate each term
+fwvor_advz_stokes = 0/1
+fwvor_gradpress = 0/1
+fwvor_breaking = 0/1
+
+
+6.     Wave dissipation by vegetation: NOT IMPLEMENTED in Schism-SWAN yet! but possible with small effort
+
+
+7.     Bottom friction
+* Add a possibility to read a map of KN (Nikuradse rugosity) for variable bed roughness used in Madsen’s formulation for Wave bottom dissipation
+  using "KN.gr3" (see SBR READ_KN_MAP in mod_wave_current.F90)
+* Add a possibility to change rough_p and KN as a function of a variable Manning's n values (see SBR "Manning2Madsen" in mod_wave_current.F90),
+  Experimental (may work in 2D only)
+
+
+8.     Wave forcing along boundaries (see "SCBOU BOUND_CHOICE" and "SCBOU NESTING_TYPE_WAVE" in SWAN "INPUT" file)
+SCBOU BOUND_CHOICE = NESTING  !UNIFORM (or CONSTANT), NESTING
+SCBOU NESTING_TYPE_WAVE = WAMPARAM ! PARM, or WAMPARAM or SPEC
+with: 
+* BOUND_CHOICE = UNIFORM, NESTING_TYPE_WAVE = PARAM : a JONSWAP spectrum with bulk parameters as detailled in "INPUT" file 
+                                                      (SCBOU GAMMA,SHAPESPEC,SIGFR,DSPR,HSIG,DIR,PER,DD)
+* BOUND_CHOICE = NESTING, NESTING_TYPE_WAVE = PARAM : Parametric Wave Boundary from a netCDF file (spatio-temoral varying) following WW3 outputs 
+                                                      (see SBR INIT_NETCDF_WW3_WAVEPARAMETER in SWAN/swan_bdcons.F90)
+* BOUND_CHOICE = NESTING, NESTING_TYPE_WAVE = WAMPARAM : Multi-Modal (WAM) using bulk wave parameters for 3 (or more) partitions
+                                                         (see SBR INIT_NETCDF_WAM_WAVEPARAMETER in SWAN/swan_bdcons.F90)
+* BOUND_CHOICE = NESTING, NESTING_TYPE_WAVE = SPEC : WW3 forcing along OBC with time varying 2D-spectra following WW3 outputs in netCDF
+                                                     (see SBR INIT_NC_WW3_SPECTRA in SWAN/swan_bdcons.F90)
+
+CAUTION : wave bounday nodes are identified using "hgrid.gr3" using open OBC segments and nodes !! 
+
+
+Example : a WAVEFILE.nc for WAMPARAM
+
+netcdf WAVEFILE {
+dimensions:
+        time = UNLIMITED ; // (226 currently)
+        nOpenBndNodes = 235 ;
+        wave_partition = 3 ;
+variables:
+        double time(time) ;
+                time:base_date = 2019, 2, 1, 0 ;
+                time:units = "days since 2019-02-01" ;
+                time:standard_name = "time" ;
+                time:long_name = "time" ;
+        float lat(nOpenBndNodes) ;
+                lat:long_name = "nodal latitude" ;
+                lat:units = "degrees_north" ;
+        float lon(nOpenBndNodes) ;
+                lon:long_name = "nodal longitude" ;
+                lon:units = "degrees_east" ;
+        float h(nOpenBndNodes) ;
+                h:long_name = "depth" ;
+                h:units = "m" ;
+        int obc_nodes(nOpenBndNodes) ;
+                obc_nodes:long_name = "node node node\000\000===== o" ;
+        float per_split(time, nOpenBndNodes, wave_partition) ;
+                per_split:long_name = "wave period in wave partitions" ;
+                per_split:units = "s" ;
+        float dir_split(time, nOpenBndNodes, wave_partition) ;
+                dir_split:long_name = "wave direction in wave partitions" ;
+                dir_split:units = "degree" ;
+        float hs_split(time, nOpenBndNodes, wave_partition) ;
+                hs_split:long_name = "wave significant height in wave partitions" ;
+                hs_split:units = "m" ;
+        float dspr_split(time, nOpenBndNodes, wave_partition) ;
+                dspr_split:long_name = "one-sided directional spreading in wave partitions" ;
+                dspr_split:units = "degree" ;
+
+// global attributes:
+                :type = "SCHISM  lateral open boundary forcing netCDF file" ;
+                :source = "Wave parameters from MFWAM" ;
+                :reference = "MEAN JONSWAP MODE" ;
+                :bulk_spec_mode = "MEAN JONSWAP MODE" ;
+                :FSHAPE_WAM = 2 ;
+                :CHAR_WAM_PERIOD = 2 ;
+                :CHAR_WAM_DSPR = 1 ;

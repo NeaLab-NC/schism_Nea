@@ -50,6 +50,10 @@
 # USE_WWM = yes
 # EXEC := $(EXEC)_WWM
 
+# Simulating Waves Nearshore SWAN
+# USE_SWAN = yes
+# EXEC := $(EXEC)_SWAN
+
 #aParametric wind module
 # USE_PAHM = yes
 # EXEC := $(EXEC)_PAHM

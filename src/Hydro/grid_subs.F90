@@ -561,6 +561,359 @@ end subroutine partition_hgrid
 !===============================================================================
 !===============================================================================
 
+subroutine partition_hgrid_metis_V5
+
+!#JL EXPERIMENTAL 
+! Compute a load-balanced partition of the horizontal grid using MeTiS V5.1
+! Apply a graph partitioning routine (METIS_PartMeshDual) applied to dual-graph
+! constructed from elements. Build a map of Weights for each partition based on the
+! performance of CPU. Input: "tpwgts_array.in" a map with values of the relative  
+! performance of hosts/cpu in the couputing pool, like:
+!  # header
+!  #6 ! Number of ranks (aka NB cpus, including scribes and compute ranks)
+!  1.00 skylake_01     ! hostname, slot0,cpu0  Skylake is our reference with 100% perf.
+!  1.00 skylake_01     ! hostname, slot1,cpu0
+!  0.50 sandybridge_02 ! hostname, slot0,cpu0  Performance of sandybridge 50% of Skylake
+!  0.50 sandybridge_02 ! hostname, slot1,cpu0
+!  0.75 ivybridge_03   ! hostname, slot0,cpu0  Performance of ivybridge 75% of Skylake
+!  0.75 ivybridge_03   ! hostname, slot1,cpu0
+! "partition_hgrid_metis_V5" compute a map of desired Weights (tpwgts) for each partition, to
+! generate a load-balanced mesh accross the couputing pool. The target partition weight for 
+! the i-th partition is specified at tpwgts(i). "partition_hgrid_metis_V5" checks that the 
+! sum of the tpwgts entries must be 1.0. If "tpwgts_array.in" is not present, mesh is divided equally
+! among the cpus. 
+! The file "tpwgts_array.in" is constructed using a perl script, using variables environment from PBS/SLURM 
+! author: jerome.lefevre@ird.fr
+!-------------------------------------------------------------------------------
+  use,intrinsic :: iso_c_binding
+  use schism_glbl 
+  use schism_msgp, only: nscribes,myrank,task_id,itype
+  use schism_msgp, only: nproc,comm,nproc_schism,ierr,parallel_abort
+  implicit none
+!#ifndef USE_MPIMODULE
+  include 'mpif.h'
+!#endif
+
+  integer,allocatable :: i34gb(:),nmgb(:,:) ! Global element-node tables
+
+  ! Miscellaneous
+  integer :: i,j,k,l,COUNT,stat,ie,ip,je,esize
+  logical :: found
+  logical :: quad = .FALSE.
+
+  ! Experimental Jerome
+  integer :: ncomprank,len
+  real(4),allocatable :: user_tpwgts(:)
+  real(4) :: rank_tpwgt,sum_tpwgt
+  character(len=MPI_MAX_PROCESSOR_NAME) :: hostname
+  character(len=MPI_MAX_PROCESSOR_NAME) :: myhost
+
+  ! Metis variables, using same declaration like in metis.h !!
+  integer(C_INT32_T)                           :: ncommon
+  integer(C_INT32_T)                           :: np_metis,ne_metis
+  integer(C_INT32_T),dimension(:), allocatable :: eptr, eind
+  integer(C_INT32_T),dimension(:), allocatable :: vwgt, vsize
+  integer(C_INT32_T)                           :: nparts
+  real(c_float), dimension(:), allocatable     :: tpwgts
+  integer(C_INT32_T),dimension(:), allocatable :: options
+  integer(C_INT32_T)                           :: objval
+  integer(C_INT32_T),dimension(:), allocatable :: epart, npart
+  !
+  !-------------------------------------------------------------------------------
+  ! INTERFACE FOR METIS_PartMeshDual, version 5.1
+  ! ----------------------------------------------
+  ! METIS_PartMeshDual(idx_t *ne, idx_t *nn, idx_t *eptr, idx_t *eind,
+  !          idx_t *vwgt, idx_t *vsize, idx_t *ncommon, idx_t *nparts,
+  !         real_t *tpwgts, idx_t *options, idx_t *objval, idx_t *epart,
+  !         idx_t *npart)
+  !
+  ! This function is used to partition a mesh into nparts parts based on a partitioning of the mesh's dual graph.
+  !
+  ! Tip: DONT Forget to change IDXTYPEWIDTH to 32 in "src/ParMetis-4.0.3/metis/include/metis.h"
+  ! see https://github.com/ivan-pi/fmetis/issues/1
+  ! see https://github.com/FESOM/fesom2/blob/master/lib/metis-5.1.0/include/metis.h
+  ! -------------------------------------------------------------------------------
+  !integer,intent(in)                 :: ne The number of elements in the mesh. (ne_global)
+  !integer,intent(in)                 :: nn The number of nodes in the mesh.    (np_global)
+  !integer,intent(in), dimension(ne+1):: eptr Array of size ne+1 used to mark the start and end locations in the nind array.
+  !integer,intent(in), dimension(3*ne):: eind Array that stores for each element the set of node IDs : this elnode in 1D
+  !integer,intent(in), optional       :: vwgt(ne)  An array of size ne specifying the weights of the elements.
+  !                                      If not present, all elements have an equal weight.
+  !integer,intent(in), optional(ne)   :: vsize(ne) An array of size ne specifying the size of the elements
+  !                                      that is used for computing the total comunication volume
+  !                                      as described in Section 5.7 of the manual. If not present,
+  !                                      the objective is cut or all elements have an equal size.
+  !integer,intent(in)                 :: ncommon Specifies the number of common nodes that two elements must have
+  !                                      in order to put an edge between hem in the dual graph
+  !integer,intent(in)                 :: nparts The number of parts to partition the mesh. (nprocs)
+  !real,intent(in), optional(nparts)  :: tpwgts(nparts) An array of size nparts that specifies the desired weight for each
+  !                                      partition. The target partition weight for the i-th partition is specified at tpwgts(i)
+  !                                      The sum of the tpwgts entries must be 1.0. If not present, the graph is divided equally
+  !                                      among the partitions.
+  !integer,intent(in), optional       :: options(METIS_NOPTIONS) An array of options as described in Section 5.4 of the manual.
+  !integer,intent(out),               :: objval  Upon successful completion, this variable stores either the edgecut or the total
+  !                                      communication volume of the dual graph's partitioning.
+  !integer,intent(out),dimension(ne)  :: epart(ne) A vector of size ne that upon successful completion stores the partition vector
+  !                                      for the elements of the mesh.
+  !integer,intent(out),dimension(nn)  :: npart(nn) A vector of size nn that upon successful completion stores the partition vector
+  !                                      for the nodes of the mesh.
+  !-------------------------------------------------------------------------------
+  interface
+    subroutine METIS_PartMeshDual(ne, nn, eptr, eind, vwgt, vsize,&
+              &ncommon, nparts, tpwgt, opts, objval, epart, npart) bind(c)
+      use iso_c_binding
+      implicit none
+      integer (C_INT32_T),                  intent(in)  :: ne, nn
+      integer (C_INT32_T), dimension(*),    intent(in)  :: eptr, eind
+      integer (C_INT32_T), dimension(*),    intent(in)  :: vwgt, vsize
+      integer (C_INT32_T),                  intent(in)  :: ncommon
+      integer (C_INT32_T),                  intent(in)  :: nparts
+      real(c_float),       dimension(*),    intent(in)  :: tpwgt
+      integer (C_INT32_T), dimension(*),    intent(in)  :: opts
+      integer (C_INT32_T),                  intent(out) :: objval
+      integer (C_INT32_T), dimension(*),    intent(out) :: epart
+      integer (C_INT32_T), dimension(*),    intent(out) :: npart
+    end subroutine METIS_PartMeshDual
+  end interface
+
+  ! Open global grid file and read global grid size
+  if(myrank==0) then
+    open(14,file=in_dir(1:len_in_dir)//'hgrid.gr3',status='old')
+    read(14,*); read(14,*) ne_global,np_global
+    close(14)
+  endif
+  call mpi_bcast(ne_global,1,itype,0,comm,i)
+  call mpi_bcast(np_global,1,itype,0,comm,i)
+
+  ! Allocate global element to resident processor vector (in global module)
+  if(allocated(iegrpv)) deallocate(iegrpv)
+  allocate(iegrpv(ne_global),stat=stat)
+  if(stat/=0) call parallel_abort('partition: iegrpv allocation failure')
+  iegrpv=0
+
+  ! Handle single processor case
+  if(nproc==1) then
+    ne=ne_global
+    iegrpv=0
+    return
+  endif
+
+  ! Handle Vertex weight fraction
+  allocate(tpwgts(nproc),stat=stat)
+  if(stat/=0) call parallel_abort('partition: tpwgts allocation failure')
+  tpwgts=1.0/real(nproc)
+
+  ! Jerome: LOAD-BALANCING, Experimental : load a map of Vertex weight fraction
+  ! -------------------------------------------------
+  inquire(file="tpwgts_array.in",exist=found)
+  if(myrank==0) write(16,*)'testing tpwgts_array.in ...'
+
+  if(found) then
+     ! How my rank is assigned to hosts in the computing Pool? ...Get the hostname
+     ! ToDo: get the slot and cpu number ... but very tricky!
+     call MPI_GET_PROCESSOR_NAME(hostname, len, ierr)
+     print*,''
+     print*,'Hostname is:',trim(hostname)
+
+     open(32,file='tpwgts_array.in',status='old')
+     read(32,*)
+     read(32,*) ncomprank   ! Total ranks
+     if(ncomprank/=nproc_schism) call parallel_abort('Trouble with tpwgts_array.in 1')
+     ncomprank= ncomprank-nscribes ! update Total compute ranks
+     if(ncomprank/=nproc) call parallel_abort('Trouble with tpwgts_array.in 2')
+
+     allocate(user_tpwgts(nproc),stat=stat)
+     if(stat/=0) call parallel_abort('partition: user_tpwgts allocation failure')
+     ! init
+     user_tpwgts = 0.0
+
+     do i=1,nproc_schism
+
+      ! I/O rank, skip
+      if (task_id==2) cycle
+
+      rank_tpwgt = 0.0
+
+      read(32,*) rank_tpwgt,myhost
+      if(rank_tpwgt<0.0) then
+          write(errmsg,*)'Negative Vertex weight fraction',rank_tpwgt
+          call parallel_abort(errmsg)
+      endif
+      ! that rank is our compute node, keep rank_tpwgt and exit loop
+      if(trim(hostname).eq.trim(myhost)) exit
+
+     enddo
+     close(32)
+
+     if(myrank==0) write(16,*)'done reading tpwgts_array.in'
+
+     call mpi_gather(rank_tpwgt,1,MPI_FLOAT,user_tpwgts,1,MPI_FLOAT, 0,comm,ierr)
+     if(ierr/=MPI_SUCCESS) call parallel_abort('partition_hgrid: gather user_tpwgts',ierr)
+
+     if(myrank==0) then
+       ! Compute the sum and normalize by the sum to get tpwgts
+       sum_tpwgt=0.0
+       do i=1,nproc
+         sum_tpwgt=sum_tpwgt+user_tpwgts(i)
+       enddo
+       do i=1,nproc
+         tpwgts(i) = user_tpwgts(i)/sum_tpwgt
+       enddo
+
+       if( abs(sum(tpwgts)-1.0)>0.05) &
+         &call parallel_abort('sum of Vertex weight fraction /= 1.')
+
+     endif !myrank==0
+  endif !found
+  ! End Jerome: LOAD-BALANCING, Experimental
+
+  !
+  ! DECOMPOSE DOMAIN BY ELEMENTS USING METIS (not ParMETIS !!)
+  !
+  IF(myrank.EQ.0) THEN
+
+   do i=1,nproc
+     print*,tpwgts(i)
+   enddo
+
+   !-----------------------------------------------------------------------------
+   ! Open global grid file
+   !-----------------------------------------------------------------------------
+   open(14,file='hgrid.gr3',status='old',iostat=stat)
+   if(stat/=0) call parallel_abort('AQUIRE_HGRID: open(14) failure')
+   !-----------------------------------------------------------------------------
+   ! Aquire and construct global data tables
+   !-----------------------------------------------------------------------------
+   ! Aquire global grid size
+   read(14,*); read(14,*) ne_global,np_global
+
+   ! Aquire global element-node tables from hgrid.gr3
+   if(allocated(i34gb)) deallocate(i34gb); allocate(i34gb(ne_global),stat=stat);
+   if(stat/=0) call parallel_abort('AQUIRE_HGRID: i34gb allocation failure')
+   if(allocated(nmgb)) deallocate(nmgb); allocate(nmgb(4,ne_global),stat=stat);
+   if(stat/=0) call parallel_abort('AQUIRE_HGRID: nmgb allocation failure')
+   do i=1,np_global; read(14,*); enddo;
+   do i=1,ne_global
+    read(14,*) ie,i34gb(ie),(nmgb(k,ie),k=1,i34gb(ie))
+    if(i34gb(ie)/=3.and.i34gb(ie)/=4) then
+      write(errmsg,*) 'AQUIRE_HGRID: Unknown type of element',ie,i34gb(ie)
+      call parallel_abort(errmsg)
+    endif
+    if(i34gb(ie)==4) quad=.true.
+   enddo
+   close(14)
+
+   !...  Quad does not work for certain options
+   if(quad) &
+     &call parallel_abort('partition_simple_hgrid: quad not working with METIS_PartMeshDual')
+
+   ! Get the element connectivity data in the form METIS needs.
+   ! --- eptr -----
+   esize   = 3 !/* triangles , etype=1 see GENDUALMETIS*/
+
+   allocate(eptr(ne_global+1),stat=stat);
+   do j=1,ne_global
+      eptr(j+1) = esize*j
+   enddo
+   !
+   ! eind: (CONVERT elnode to 1D)
+   ! ---------------------------
+   allocate(eind(esize*ne_global))
+   do i=1,ne_global
+    do j = 1,esize
+        COUNT = (i-1)*esize + j
+        eind(COUNT) = nmgb(j,i)
+        enddo
+   enddo
+
+   if(MAXVAL(eind).NE.np_global) then
+       print*,'MAXVAL(NVT) ',MAXVAL(eind)
+       print*,'np_global ',np_global
+       call parallel_abort('partition: error')
+   endif
+
+   ! With 1-based indexing, need to add 1 to eptr.
+   eptr = eptr+1
+
+!  Set MeTiS options
+!  -----------------
+   allocate(options(0:39),stat=stat)
+   if(stat/=0) call parallel_abort('partition: options allocation failure')
+
+   call METIS_SetDefaultOptions(options)
+   options(0)  = 1  ! Partitioning 0:Multilevel recursive bisectioning,1:Multilevel k-way partitioning
+   options(5)  = 1  ! Dbg Level 1:Shows configs,2:Time,4:Show the coarsening progress,8:Show the refinement progress */
+   options(6)  = 25 ! METIS_OPTION_NITER /* higher => better quality, more compute time. Default: 10 */
+   options(7)  = 2  ! METIS_OPTION_NCUTS /* Build NCUTS partitions, choose the best */
+   options(8)  = 15 ! Random number seed
+!  options(16) = 1  ! METIS_OPTION_UFACTOR /* max. allowed load inbalance */
+   options(17) = 1  ! METIS_OPTION_NUMBERING. /* Fortran Numbering */
+
+   print*,"METIS Options"
+   print*,options
+
+   ! Init,set Metis input args
+   ne_metis = ne_global
+   np_metis = np_global
+   nparts   = nproc
+   ncommon  = 1 ! ncommon Specifies the number of common nodes that two elements must have in
+                ! order to put an edge between hem in the dual graph
+
+   allocate(vwgt(ne_global),stat=stat)
+   if(stat/=0) call parallel_abort('partition: vwgt allocation failure')
+   vwgt = 1 !ToDo
+
+   allocate(vsize(ne_global),stat=stat)
+   if(stat/=0) call parallel_abort('partition: vsize allocation failure')
+   vsize = 1 !ToDo
+
+   ! Init,set Metis output args
+   objval = 1 !alias for edgecut
+
+   allocate(npart(np_global),stat=stat)
+   if(stat/=0) call parallel_abort('METIS npart: allocation failure')
+   npart = 0
+
+   allocate(epart(ne_global),stat=stat)
+   if(stat/=0) call parallel_abort('METIS epart: allocation failure')
+   epart = 0
+
+   write(16,*)'CALL METIS_PartMeshDual (METIS 5.1)'
+
+   print*,'METIS_PartMeshDual (METIS 5.1)'
+   print*,'------------------------------'
+   CALL METIS_PartMeshDual(ne_metis,np_metis,eptr,eind,vwgt,vsize,ncommon, &
+                         &nparts,tpwgts,options,objval,epart,npart)
+
+   ! Change partition numbering to start from 0
+   epart = epart-1
+
+   do i=1,ne_global
+     iegrpv(i) = epart(i)
+   enddo
+
+   DEALLOCATE(epart,npart,vwgt,vsize,eptr,eind,options)
+   DEALLOCATE(i34gb,nmgb)
+
+   !do i=1,ne_global
+   !  print*,iegrpv(i)
+   !enddo
+
+  ENDIF !IF(myrank==0)
+
+  IF(ALLOCATED(tpwgts)) DEALLOCATE(tpwgts)
+
+  ! BROADCAST element-to-resident-processor assignment vector (iegrpv)
+
+  CALL MPI_BCAST(iegrpv,ne_global,itype,0,comm,ierr)
+  if(ierr/=MPI_SUCCESS) call parallel_abort('partition: MPI_BCAST',ierr)
+
+  if(myrank==0) write(16,*)'partition: done'
+
+end subroutine partition_hgrid_metis_V5
+
+!===============================================================================
+
 subroutine aquire_hgrid(full_aquire)
 !-------------------------------------------------------------------------------
 ! Based on a partition specified by iegrpv(i) aquire horizontal grid for
@@ -618,6 +971,10 @@ subroutine aquire_hgrid(full_aquire)
   integer :: intvalue
   real(rkind) :: realvalue
   character(len=2) :: stringvalue
+  !#JL EXPERIMENTAL: put hostname too in the resume for partition
+  integer ::len
+  character(MPI_MAX_PROCESSOR_NAME) :: hostname
+  character(len=MPI_MAX_PROCESSOR_NAME) :: map_hostname(nproc)
 !-------------------------------------------------------------------------------
 
   !-----------------------------------------------------------------------------
@@ -1646,17 +2003,25 @@ subroutine aquire_hgrid(full_aquire)
     isbuf(11)=nsa; isbuf(12)=ns; isbuf(13)=nsg; isbuf(14)=nsa2; isbuf(15)=nsg2;
     call mpi_gather(isbuf,15,itype,irbuf,15,itype,0,comm,ierr)
     if(ierr/=MPI_SUCCESS) call parallel_abort('AQUIRE_HGRID: gather subdomain size',ierr)
+    !#JL EXEPRIMENTAL Grab Hostnames too !!
+    call MPI_GET_PROCESSOR_NAME(hostname, len, ierr)
+    if(ierr/=MPI_SUCCESS) call parallel_abort('AQUIRE_HGRID: gather hostname 1',ierr)
+    call mpi_Gather(hostname, MPI_MAX_PROCESSOR_NAME, MPI_CHAR, map_hostname, MPI_MAX_PROCESSOR_NAME, MPI_CHAR,0,comm,ierr)
+    if(ierr/=MPI_SUCCESS) call parallel_abort('AQUIRE_HGRID: gather hostname 2',ierr)
+
     if(myrank==0) then
       write(16,'(/a)') '**********Augmented Subdomain Sizes**********'
-      write(16,'(16a)') ' rank', &
+      write(16,'(17a)') ' rank', &
       &'     nea','      ne','     neg','     nea2','     neg2', &
       &'     npa','      np','     npg','     npa2','     npg2', &
-      &'     nsa','      ns','     nsg','     nsa2','     nsg2'
+      &'     nsa','      ns','     nsg','     nsa2','     nsg2', &
+      &'    host'
       do i=0,nproc-1
-        write(16,'(i5,15i8)') i, &
+        write(16,'(i5,15i8,2x,a)') i, &
         &irbuf(15*i+1),irbuf(15*i+2),irbuf(15*i+3),irbuf(15*i+4),irbuf(15*i+5), &
         &irbuf(15*i+6),irbuf(15*i+7),irbuf(15*i+8),irbuf(15*i+9),irbuf(15*i+10), &
-        &irbuf(15*i+11),irbuf(15*i+12),irbuf(15*i+13),irbuf(15*i+14),irbuf(15*i+15)
+        &irbuf(15*i+11),irbuf(15*i+12),irbuf(15*i+13),irbuf(15*i+14),irbuf(15*i+15), &
+        &trim(map_hostname(i+1))
       enddo
     endif !myrank==0
     call parallel_barrier
@@ -2493,11 +2858,16 @@ subroutine dump_hgrid
 !-------------------------------------------------------------------------------
   use schism_glbl
   use schism_msgp
+  use netcdf
   implicit none
   integer, parameter :: maxbuf=max(100,3)
   integer :: ie,ip,i,j,k,ngb1,ngb2,isd,isdgb,iegb1,iegb2
   integer :: ibuf1(maxbuf),ibuf2(maxbuf),ibuf3(maxbuf)
   type(llist_type),pointer :: llp
+  !#JL: write local-global mapping info in netcDF format 
+  integer:: ncid_g2l   ! global_to_local netcdf Id
+  character(len=140) :: fname
+  integer:: elem_dim,var_id,iret
 !-------------------------------------------------------------------------------
 
 #ifdef DEBUG
@@ -2702,12 +3072,30 @@ subroutine dump_hgrid
 
   ! Rank 0 writes global to local element info
   if(myrank==0) then
+
+  !#JL, EXPERIMENTAL, write global_to_local in netCDF format 
+#if 0
     open(32,file=out_dir(1:len_out_dir)//'global_to_local.prop',status='unknown')
     write(32,'(i8,1x,i6)')(ie,iegrpv(ie),ie=1,ne_global)
     !Add more info
 !    write(32,*)
 !    write(32,*)nproc
     close(32)
+    write(16,*)'writing global_to_local.prop ... done'
+#else
+    fname = out_dir(1:len_out_dir)//'global_to_local.nc'
+    iret=nf90_create(trim(adjustl(fname)),OR(NF90_NETCDF4,NF90_CLOBBER),ncid_g2l)
+    iret=nf90_def_dim(ncid_g2l,'ne_global',ne_global,elem_dim)
+    ! Global element to resident processor vector
+    iret=nf90_def_var(ncid_g2l,'map_ele2proc',NF90_INT,(/elem_dim/),var_id)
+    iret=nf90_put_var(ncid_g2l,var_id,iegrpv(1:ne_global) )
+    !Add more info
+    iret=nf90_put_att(ncid_g2l,NF90_GLOBAL,'nproc',nproc)
+    iret=nf90_sync(ncid_g2l)     ! /* synchronize to disk */
+    iret=nf90_close(ncid_g2l)
+    write(16,*)'writing global_to_local.nc ... done'
+    call flush(16)
+#endif
   endif
 
 end subroutine dump_hgrid
