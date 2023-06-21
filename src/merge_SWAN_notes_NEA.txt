@@ -79,11 +79,15 @@ fwvor_breaking = 0/1
 6.     Wave dissipation by vegetation: NOT IMPLEMENTED in Schism-SWAN yet! but possible with small effort
 
 
-7.     Bottom friction
+7.     Bottom friction for hydrodynamics and wave + wave-enhanced current bottom drag
 * Add a possibility to read a map of KN (Nikuradse rugosity) for variable bed roughness used in Madsen’s formulation for Wave bottom dissipation
   using "KN.gr3" (see SBR READ_KN_MAP in mod_wave_current.F90)
-* Add a possibility to change rough_p and KN as a function of a variable Manning's n values (see SBR "Manning2Madsen" in mod_wave_current.F90),
-  Experimental (may work in 2D only)
+* Add a possibility to change "rough_p" values for schism hydrodynamics and KN for Wave Dynamics as a function of a variable Manning's n values 
+  (see SBR "Manning2Madsen" in mod_wave_current.F90). Changes based on Casey Dietrich's works. The relationship "Manning's n-rough_p Z0" is derived from 
+  Bretschneider et al. 1986.  
+* Add a possibility to compute wave-enhanced current bottom drag using Manning.gr3 instead rough.gr3 (if iwbl = 2 (Soulsby) & nchi=-1 & USE_SWAN)   
+  Experimental, tested in 3D with RADFLAG=VOR.
+  
 
 
 8.     Wave forcing along boundaries (see "SCBOU BOUND_CHOICE" and "SCBOU NESTING_TYPE_WAVE" in SWAN "INPUT" file)

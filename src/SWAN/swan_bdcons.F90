@@ -55,24 +55,15 @@
       REAL(rkind) :: DTMP
       INTEGER ITMP
       ! LOCAL should be global
-      INTEGER :: LBINTER
 
-      LBINTER = 1
+      if(myrank.eq.0) print*,'COMPUTE_IT',WBTMJD,BND_TIME_ALL_FILES(1,1),DAY2SEC,WBDELT
+      if(myrank.eq.0) print*,'COMPUTE_IT',LBINTER
 
-!      DTMP = (MAIN%TMJD-BND_TIME_ALL_FILES(1,1)) * DAY2SEC
-
-      print*,'COMPUTE_IT',WBTMJD,BND_TIME_ALL_FILES(1,1),DAY2SEC,WBDELT
-
-      !DTMP = (WBTMJD-BND_TIME_ALL_FILES(1,1)) * DAY2SEC
       DTMP = TIMCO - BND_TIME_ALL_FILES(1,1)*DAY2SEC
-
-      !IT   = NINT(DTMP/SEBO%DELT) + 1
       IT   = NINT(DTMP/WBDELT)+ 1
-  
-      print*,'COMPUTE_IT',IT,DTMP
-      
+      IF(LBINTER) IT = IT + 1
 
-      IF (LBINTER==1) IT = IT + 1
+      if(myrank.eq.0) print*,'COMPUTE_IT',IT,DTMP
 
       END SUBROUTINE
 
@@ -465,7 +456,7 @@
       IMPLICIT NONE
       REAL(rkind), INTENT(IN)  :: SPEC_WW3(MDC_WW3,MSC_WW3,NP_WW3)
       REAL(rkind), INTENT(OUT) :: SPEC_SWAN(MDC,MSC,NP_WW3)
-      REAL(rkind) :: SPEC_WW3_TMP(MDC_WW3,MSC,NP_WW3)
+      REAL(rkind) :: SPEC_WW3_TMP(MDC,MSC_WW3,NP_WW3)
       REAL(rkind) :: DF, M0_WW3, M1_WW3, M2_WW3, M0_SWAN, M1_SWAN, M2_SWAN
       INTEGER     :: IP,IS,ID
       REAL(rkind) :: JACOBIAN(MSC), AM, SM, FR(MSC)
@@ -738,7 +729,7 @@
       USE NETCDF
 
       IMPLICIT NONE
-      REAL(rkind), INTENT(OUT) :: SPECOUT(MSC_WW3,MDC_WW3,NP_WW3)
+      REAL(rkind), INTENT(OUT) :: SPECOUT(MDC_WW3,MSC_WW3,NP_WW3)
       INTEGER, INTENT(IN) :: ISTEP
       REAL :: SPEC_WW3(MDC_WW3,MSC_WW3)
       INTEGER :: IP, BND_NCID, ENERGY_VAR_ID, DD, FF, ISTAT
@@ -796,7 +787,7 @@
              call parallel_abort("ERROR WHILE READING SPECTRA, 3")
           !! Re-ordering spectrum (WW3 is [MDC_WW3,MSC_WW3] while WWM is [MSC_WW3,MDC_WW3])
           !!SPECOUT(:,:,IP) = TRANSPOSE(SPEC_WW3)
-          SPECOUT(:,:,IP) = SPEC_WW3
+          SPECOUT(:,:,IP) = SPEC_WW3(:,:)
        ENDDO ! IP
 
        ELSE ! stationary ...
@@ -806,7 +797,7 @@
              call parallel_abort("ERROR WHILE READING SPECTRA, 4")
           ! Re-ordering spectrum (WW3 is [MDC_WW3,MSC_WW3] while WWM is [MSC_WW3,MDC_WW3])
           !SPECOUT(:,:,IP) = TRANSPOSE(SPEC_WW3)
-          SPECOUT(:,:,IP) = SPEC_WW3
+          SPECOUT(:,:,IP) = SPEC_WW3(:,:)
         END DO
        ENDIF
 
@@ -815,7 +806,7 @@
          call parallel_abort("ERROR WHILE CLOSING NETCDF FILE, 5")
 
       ENDIF
-      END SUBROUTINE
+      END SUBROUTINE READ_SPEC_NC_WW3_KERNEL
 
 !**********************************************************************
 !*                                                                    *
@@ -916,9 +907,14 @@
       IF( TRIM(NESTING_TYPE_WAVE) /= 'PARAM' .or.     &
           TRIM(NESTING_TYPE_WAVE) /= 'WAMPARAM' .or.  &
           TRIM(NESTING_TYPE_WAVE) /= 'SPEC') THEN
+
+         LBINTER = .FALSE.
+
          CALL WAVE_BOUNDARY_CONDITION !(WBAC)
          !IF (LBINTER) WBACOLD = WBAC
          WBACOLD = WBAC
+
+         LBINTER = .TRUE.
         
       END IF
 
